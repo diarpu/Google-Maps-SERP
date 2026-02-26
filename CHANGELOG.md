@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-02-27
+
+### Scanner Accuracy & CID Matching Release
+
+This release fixes critical accuracy issues in the scanner — businesses are now matched by their unique CID/Place ID instead of loose name matching, and zip code lookups are geographically precise.
+
+#### Fixed
+- **Critical: PlaceId Never Saved** — `api/scans/route.ts` used `(req as any).placeId` instead of the destructured `placeId` variable, meaning the Place ID was **never persisted** to the database. Every scan fell back to name matching.
+- **CID Format Mismatch** — Business lookup extracted CID as hex while the scraper converted to decimal. These never matched. Both now use consistent decimal format.
+- **False Positive Name Matching** — Removed the 80% token overlap matching that caused unrelated businesses sharing common words (e.g., "Cash For Junk Cars Arizona" matching "Cash For Junk Scrap Cars") to show as found. Now requires exact match or 10+ character substring containment.
+- **Zip Code Search Returning Wrong Cities** — Postal lookup used substring matching (`pnLower.includes(cityLower)`) which matched "Chicago Park, CA" for a "Chicago" search. Now uses strict exact-match and bounding-box-first strategy.
+- **Map Auto-Pan on Pin Click** — Clicking a pin no longer moves or zooms the map. View position is frozen using save/restore with `requestAnimationFrame`.
+
+#### Added
+- **CID-First Matching** — Scanner now matches businesses in priority order: CID → PlaceID → Cross-check → Strict name match. This eliminates false positives.
+- **Auto-Save CID** — On first name-based match, the CID is automatically saved to the scan record so all subsequent grid points use CID matching.
+- **Numbered Map Markers** — Grid points now display the actual rank number (1-20) inside each marker. Colors: green (1-3), orange (4-10), red (11-20), dark gray with ✕ (not found).
+- **Radius-Based Postal Lookup** — Added Haversine-based radius search as a fallback for zip code lookups when bounding box returns too few results.
+- **Updated Map Legend** — Legend now shows numbered examples for each rank tier and includes the "Not Found" state.
+
+#### Changed
+- **Zip Code Strategy Reversed** — Bounding box is now the primary lookup (geographically exact), with radius and name-match as fallbacks. Previously name-match was primary, causing cross-state false positives.
+- **Lookup CID Extraction** — Both URL imports and search results now extract CID as decimal and include ChIJ Place ID when available.
+
+---
+
 ## [1.3.0] - 2026-02-12
 
 ### Review Intel & Deep Scraping Release

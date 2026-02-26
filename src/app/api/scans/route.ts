@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma';
 import { NextResponse } from 'next/server';
-import { runScan } from '@/lib/scanner';
+import { enqueueScan } from '@/lib/scanQueue';
 import { logger } from '@/lib/logger';
 
 export async function GET() {
@@ -45,16 +45,15 @@ export async function POST(req: Request) {
                 customPoints: customPoints ? JSON.stringify(customPoints) : null,
                 frequency: frequency || 'ONCE',
                 businessName: businessName || undefined,
-                placeId: (req as any).placeId || undefined, // Will be extracted from request body below
+                placeId: placeId || undefined,
                 status: 'PENDING',
             },
         });
 
-        // Start scan in background
+        // Start scan via queue (respects concurrency limit)
         logger.info(`New scan created: "${keyword}"`, 'API', { scanId: scan.id });
-        runScan(scan.id).catch(err => {
-            logger.error(`Background scan handler crashed for ${scan.id}: ${err.message}`, 'API', { scanId: scan.id, stack: err.stack });
-        });
+        const queueResult = enqueueScan(scan.id);
+        logger.info(`Scan ${scan.id} enqueue result: ${queueResult}`, 'API');
 
         return NextResponse.json(scan);
     } catch (error) {

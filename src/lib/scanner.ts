@@ -69,7 +69,8 @@ function normalizeBusinessName(name: string): string {
 
 /**
  * Check if two business names match, using normalized comparison.
- * Returns true if one name contains the other (after normalization).
+ * STRICT: Only exact match, or full containment with minimum length guard.
+ * This prevents "Cash" from matching "Cash For Cars" etc.
  */
 function businessNamesMatch(scanName: string, resultName: string): boolean {
     const normScan = normalizeBusinessName(scanName);
@@ -80,16 +81,12 @@ function businessNamesMatch(scanName: string, resultName: string): boolean {
     // Exact match after normalization
     if (normScan === normResult) return true;
 
-    // Check if one fully contains the other
-    if (normResult.includes(normScan) || normScan.includes(normResult)) return true;
+    // Containment check with minimum length guard:
+    // Only allow if the shorter string is at least 10 chars to prevent false positives
+    const shorter = normScan.length < normResult.length ? normScan : normResult;
+    const longer = normScan.length < normResult.length ? normResult : normScan;
 
-    // Token overlap check: if 80%+ of words in the scan name appear in the result
-    const scanTokens = normScan.split(' ').filter(t => t.length > 1);
-    const resultTokens = new Set(normResult.split(' ').filter(t => t.length > 1));
-    if (scanTokens.length > 0) {
-        const matchCount = scanTokens.filter(t => resultTokens.has(t)).length;
-        if (matchCount / scanTokens.length >= 0.8) return true;
-    }
+    if (shorter.length >= 10 && longer.includes(shorter)) return true;
 
     return false;
 }
@@ -327,14 +324,41 @@ export async function runScan(scanId: string) {
 
             let rank = null;
             let targetName = null;
+            let matchMethod = 'none';
 
+            // ── PRIORITY 1: Match by CID (decimal string — most reliable) ──
             if (scan.placeId) {
-                // Precision matching using Google Place ID
-                const match = results.find(r => r.placeId === scan.placeId || r.cid === scan.placeId); // Handle case where user provided CID as ID
+                // Check if scan.placeId is a CID (all digits) or a ChIJ placeId
+                const isCID = /^\d+$/.test(scan.placeId);
+                const isChIJ = scan.placeId.startsWith('ChIJ');
+
+                let match = null;
+
+                if (isCID) {
+                    // Match by CID directly
+                    match = results.find(r => r.cid === scan.placeId);
+                    if (match) matchMethod = 'CID';
+                }
+
+                if (!match && isChIJ) {
+                    // Match by ChIJ Place ID
+                    match = results.find(r => r.placeId === scan.placeId);
+                    if (match) matchMethod = 'PlaceID';
+                }
+
+                if (!match) {
+                    // Cross-check: placeId might be stored as CID, result might have it as placeId or vice versa
+                    match = results.find(r =>
+                        (r.cid && r.cid === scan.placeId) ||
+                        (r.placeId && r.placeId === scan.placeId)
+                    );
+                    if (match) matchMethod = 'CrossID';
+                }
+
                 if (match) {
                     rank = match.rank;
                     targetName = match.name;
-                    // Auto-correct business name if we have a better one
+                    // Auto-fill business name if not set
                     if (!scan.businessName) {
                         await prisma.scan.update({
                             where: { id: scan.id },
@@ -342,13 +366,29 @@ export async function runScan(scanId: string) {
                         });
                     }
                 }
-            } else if (scan.businessName) {
-                // Fallback to name matching
+            }
+
+            // ── PRIORITY 2: Strict name matching (only if no ID match) ──
+            if (rank === null && scan.businessName) {
                 const match = results.find(r => businessNamesMatch(scan.businessName!, r.name));
                 if (match) {
                     rank = match.rank;
                     targetName = match.name;
+                    matchMethod = 'Name';
+
+                    // If we got a name match, save the CID for future accurate matching
+                    if (match.cid && !scan.placeId) {
+                        await prisma.scan.update({
+                            where: { id: scan.id },
+                            data: { placeId: match.cid }
+                        });
+                        await logger.info(`[Matching] Auto-saved CID ${match.cid} for scan ${scan.id} from name match`, 'SCANNER');
+                    }
                 }
+            }
+
+            if (rank !== null) {
+                await logger.debug(`[Matching] Point ${point.lat},${point.lng}: Rank ${rank} via ${matchMethod} ("${targetName}")`, 'SCANNER');
             }
 
             await prisma.result.create({

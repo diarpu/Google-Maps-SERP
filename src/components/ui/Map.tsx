@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import {
     MapContainer,
     TileLayer,
-    CircleMarker,
     Popup,
     useMap,
     ZoomControl,
@@ -73,28 +72,7 @@ const RankMarker = ({
     onClick?: (point: Point) => void;
     onMove?: (pointId: string, lat: number, lng: number) => void;
 }) => {
-    let color = '#9ca3af'; // gray-400 (not found)
-    let fillColor = '#d1d5db'; // gray-300
-    let radius = 14;
-
-    if (point.rank !== null) {
-        if (point.rank <= 3) {
-            color = '#15803d'; // green-700
-            fillColor = '#22c55e'; // green-500
-            radius = 18;
-        } else if (point.rank <= 10) {
-            color = '#b45309'; // amber-700
-            fillColor = '#f59e0b'; // amber-500
-            radius = 16;
-        } else {
-            color = '#b91c1c'; // red-700
-            fillColor = '#ef4444'; // red-500
-        }
-    } else if (point.hasData) {
-        color = '#2563eb'; // blue-600
-        fillColor = '#60a5fa'; // blue-400
-        radius = 16;
-    }
+    const map = useMap();
 
     if (point.draggable && onMove && point.id) {
         return (
@@ -112,25 +90,97 @@ const RankMarker = ({
         );
     }
 
+    // Determine color and label based on rank
+    let bgColor: string;
+    let borderColor: string;
+    let textColor: string;
+    let label: string;
+
+    if (point.rank !== null && point.rank >= 1) {
+        label = String(point.rank);
+        if (point.rank <= 3) {
+            // Top 3 — Green
+            bgColor = '#22c55e';
+            borderColor = '#15803d';
+            textColor = '#ffffff';
+        } else if (point.rank <= 10) {
+            // 4-10 — Orange/Amber  
+            bgColor = '#f59e0b';
+            borderColor = '#b45309';
+            textColor = '#ffffff';
+        } else {
+            // 11-20 — Red
+            bgColor = '#ef4444';
+            borderColor = '#b91c1c';
+            textColor = '#ffffff';
+        }
+    } else {
+        // Not found — Dark with X
+        label = '✕';
+        bgColor = '#4b5563';
+        borderColor = '#1f2937';
+        textColor = '#ffffff';
+    }
+
+    const size = 30;
+    const fontSize = label.length > 1 ? 11 : 13;
+
+    const icon = L.divIcon({
+        className: '',  // Remove default leaflet styles
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2],
+        popupAnchor: [0, -size / 2],
+        html: `<div style="
+            width: ${size}px;
+            height: ${size}px;
+            border-radius: 50%;
+            background: ${bgColor};
+            border: 2.5px solid ${borderColor};
+            color: ${textColor};
+            font-size: ${fontSize}px;
+            font-weight: 700;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+            cursor: pointer;
+            user-select: none;
+            line-height: 1;
+        ">${label}</div>`,
+    });
+
     return (
-        <CircleMarker
-            center={[point.lat, point.lng]}
-            radius={radius}
+        <Marker
+            position={[point.lat, point.lng]}
+            icon={icon}
+            bubblingMouseEvents={false}
             eventHandlers={{
-                click: () => onClick?.(point),
+                click: (e) => {
+                    // Freeze the map — save current view
+                    const center = map.getCenter();
+                    const zoom = map.getZoom();
+
+                    // Stop any in-progress animations
+                    L.DomEvent.stopPropagation(e.originalEvent);
+                    L.DomEvent.preventDefault(e.originalEvent);
+
+                    // Fire the callback
+                    onClick?.(point);
+
+                    // Immediately restore the map position (undo any auto-pan)
+                    requestAnimationFrame(() => {
+                        map.setView(center, zoom, { animate: false });
+                    });
+                },
             }}
-            pathOptions={{
-                color: color,
-                weight: 2,
-                fillColor: fillColor,
-                fillOpacity: 1,
-            }}
+            keyboard={false}
         >
             {!onClick && (
-                <Popup className="font-sans">
+                <Popup className="font-sans" autoPan={false}>
                     <div className="text-center p-1">
                         <div className="font-bold text-lg mb-1 text-gray-900">
-                            #{point.rank ?? '-'}
+                            {point.rank !== null ? `#${point.rank}` : 'Not Found'}
                         </div>
                         <div className="text-xs text-gray-500">
                             Lat: {point.lat.toFixed(4)}<br />
@@ -139,7 +189,7 @@ const RankMarker = ({
                     </div>
                 </Popup>
             )}
-        </CircleMarker>
+        </Marker>
     );
 };
 
@@ -253,16 +303,20 @@ export default function LeafletMap({
                 <div className="absolute top-4 right-4 bg-white/95 backdrop-blur border border-gray-200 p-3 rounded-lg shadow-lg z-[1000] text-xs font-medium space-y-2">
                     <div className="font-bold text-gray-900 mb-1 border-b border-gray-100 pb-1">Rank Legend</div>
                     <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full bg-green-500 border border-green-700"></div>
-                        <span className="text-gray-700">1 - 3</span>
+                        <div className="w-5 h-5 rounded-full bg-green-500 border-2 border-green-700 flex items-center justify-center text-[9px] font-bold text-white">1</div>
+                        <span className="text-gray-700">Top 3</span>
                     </div>
                     <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full bg-amber-500 border border-amber-700"></div>
+                        <div className="w-5 h-5 rounded-full bg-amber-500 border-2 border-amber-700 flex items-center justify-center text-[9px] font-bold text-white">5</div>
                         <span className="text-gray-700">4 - 10</span>
                     </div>
                     <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full bg-red-500 border border-red-700"></div>
-                        <span className="text-gray-700">11+</span>
+                        <div className="w-5 h-5 rounded-full bg-red-500 border-2 border-red-700 flex items-center justify-center text-[9px] font-bold text-white">15</div>
+                        <span className="text-gray-700">11 - 20</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <div className="w-5 h-5 rounded-full bg-gray-600 border-2 border-gray-800 flex items-center justify-center text-[9px] font-bold text-white">✕</div>
+                        <span className="text-gray-700">Not Found</span>
                     </div>
                 </div>
             )}

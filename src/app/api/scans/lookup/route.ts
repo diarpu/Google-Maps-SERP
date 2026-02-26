@@ -117,17 +117,24 @@ export async function POST(request: Request) {
                 const lat = urlParts ? parseFloat(urlParts[1]) : null;
                 const lng = urlParts ? parseFloat(urlParts[2]) : null;
 
-                // Extract Place ID
+                // Extract CID (decimal) — this is the most reliable unique ID
+                let cid = '';
                 let placeId = '';
-                const placeIdMatch = window.location.href.match(/!1s(0x[0-9a-f]+:0x[0-9a-f]+)/);
-                if (placeIdMatch) {
-                    placeId = placeIdMatch[1]; // Use CID as pseudo-PlaceID if real one not found
+                const cidMatch = window.location.href.match(/0x[\da-fA-F]+:0x([\da-fA-F]+)/);
+                if (cidMatch) {
+                    try {
+                        cid = BigInt('0x' + cidMatch[1]).toString(); // Convert hex → decimal
+                    } catch {
+                        cid = cidMatch[1];
+                    }
                 }
-                // Try to find actual ChIJ... Place ID
+                // Also try to find ChIJ... Place ID
                 const realPlaceIdMatch = window.location.href.match(/!1s(ChIJ[A-Za-z0-9_-]+)/);
                 if (realPlaceIdMatch) {
                     placeId = realPlaceIdMatch[1];
                 }
+                // Use CID as fallback identifier if no ChIJ placeId
+                if (!placeId && cid) placeId = cid;
 
                 return {
                     name,
@@ -135,7 +142,8 @@ export async function POST(request: Request) {
                     lat,
                     lng,
                     url: window.location.href,
-                    placeId
+                    placeId,
+                    cid
                 };
             });
 
@@ -164,17 +172,28 @@ export async function POST(request: Request) {
                     const addressEl = item.querySelector('.W4Pne, .Wvk9S');
                     const link = item.querySelector('a')?.href || '';
 
+                    let cid = '';
                     let placeId = '';
                     if (link) {
                         const cidMatch = link.match(/0x[\da-fA-F]+:0x([\da-fA-F]+)/);
-                        if (cidMatch) placeId = cidMatch[1]; // Use CID
+                        if (cidMatch) {
+                            try {
+                                cid = BigInt('0x' + cidMatch[1]).toString(); // hex → decimal
+                            } catch {
+                                cid = cidMatch[1];
+                            }
+                        }
+                        const placeIdMatch = link.match(/!1s(ChIJ[A-Za-z0-9_-]+)/);
+                        if (placeIdMatch) placeId = placeIdMatch[1];
+                        if (!placeId && cid) placeId = cid;
                     }
 
                     return {
                         name: nameEl?.textContent?.trim() || '',
                         address: addressEl?.textContent?.trim() || '',
                         url: link,
-                        placeId
+                        placeId,
+                        cid
                     };
                 }).filter(r => r.name);
             });
