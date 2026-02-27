@@ -11,6 +11,67 @@ interface AddressResolverProps {
 // Simple in-memory cache to prevent duplicate fetches across the session
 const addressCache = new Map<string, string>();
 
+// Global queue to strict rate-limit Nominatim requests (1 req per 1.5s to be safe)
+type QueueItem = {
+    lat: number;
+    lng: number;
+    resolve: (address: string) => void;
+    reject: (err: any) => void;
+};
+
+const geocodeQueue: QueueItem[] = [];
+let isProcessingQueue = false;
+
+const processQueue = async () => {
+    if (isProcessingQueue || geocodeQueue.length === 0) return;
+    isProcessingQueue = true;
+
+    while (geocodeQueue.length > 0) {
+        const item = geocodeQueue.shift();
+        if (!item) continue;
+
+        try {
+            // Using our own API route to bypass client-side CORS blocking from Nominatim
+            const url = `/api/system/reverse-geocode?lat=${item.lat}&lng=${item.lng}`;
+            const res = await fetch(url);
+
+            if (!res.ok) throw new Error(`Geocoding failed: ${res.statusText}`);
+            const data = await res.json();
+
+            // The proxy API returns the direct JSON. Parse the same way.
+            let resolvedAddress = 'Unknown Location';
+            if (data.display_name) {
+                resolvedAddress = data.display_name;
+            } else if (data.address) {
+                const { road, house_number, neighbourhood, suburb, city } = data.address;
+                const parts = [];
+                if (house_number && road) parts.push(`${house_number} ${road}`);
+                else if (road) parts.push(road);
+                if (neighbourhood) parts.push(neighbourhood);
+                else if (suburb) parts.push(suburb);
+                else if (city && parts.length === 0) parts.push(city);
+                if (parts.length > 0) resolvedAddress = parts.join(', ');
+            }
+
+            item.resolve(resolvedAddress);
+        } catch (err) {
+            item.reject(err);
+        }
+
+        // Wait strict 1.5 seconds before next request (Nominatim policy: strict 1 req/sec max)
+        await new Promise(r => setTimeout(r, 1500));
+    }
+
+    isProcessingQueue = false;
+};
+
+const enqueueGeocode = (lat: number, lng: number): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        geocodeQueue.push({ lat, lng, resolve, reject });
+        processQueue();
+    });
+};
+
 export function AddressResolver({ lat, lng }: AddressResolverProps) {
     const [address, setAddress] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -53,45 +114,7 @@ export function AddressResolver({ lat, lng }: AddressResolverProps) {
     const fetchAddress = async () => {
         setLoading(true);
         try {
-            // Using OpenStreetMap Nominatim API (free, open-source reverse geocoding)
-            // Note: Respect their rate limits - 1 req/sec maximum for free tier.
-            // Our intersection observer naturally staggers requests as user scrolls.
-            const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}`;
-            const res = await fetch(url, {
-                headers: {
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    // Identifying our app per Nominatim Usage Policy
-                    'User-Agent': 'GMB-SERP-Tracker/1.0'
-                }
-            });
-
-            if (!res.ok) throw new Error('Geocoding failed');
-
-            const data = await res.json();
-
-            // Use the full formatted address provided by OpenStreetMap
-            let resolvedAddress = 'Unknown Location';
-
-            if (data.display_name) {
-                resolvedAddress = data.display_name;
-            } else if (data.address) {
-                const { road, house_number, neighbourhood, suburb, city } = data.address;
-                const parts = [];
-                if (house_number && road) {
-                    parts.push(`${house_number} ${road}`);
-                } else if (road) {
-                    parts.push(road);
-                }
-
-                if (neighbourhood) parts.push(neighbourhood);
-                else if (suburb) parts.push(suburb);
-                else if (city && parts.length === 0) parts.push(city);
-
-                if (parts.length > 0) {
-                    resolvedAddress = parts.join(', ');
-                }
-            }
-
+            const resolvedAddress = await enqueueGeocode(lat, lng);
             setAddress(resolvedAddress);
             addressCache.set(cacheKey, resolvedAddress);
 

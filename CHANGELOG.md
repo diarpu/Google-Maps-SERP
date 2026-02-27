@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.1] - 2026-02-27
+
+### Address Resolver Reliability Patch
+
+#### Fixed
+- **Address Resolution Failures:** Fixed an issue where the `AddressResolver` would fail with "Location unknown" due to browser CORS policies and strict OpenStreetMap rate limits.
+- **Backend API Proxy:** Requests are now routed through a dedicated local `/api/system/reverse-geocode` proxy with a strictly managed server-side 1.5-second processing queue.
+
+---
+
 ## [1.6.0] - 2026-02-27
 
 ### Grid Status Enhancements Release

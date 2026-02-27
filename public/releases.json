@@ -1,5 +1,15 @@
 [
     {
+        "version": "1.6.1",
+        "date": "2026-02-27",
+        "title": "Address Resolver Reliability Patch",
+        "changes": [
+            "Fixed 'Location unknown' errors during address resolution.",
+            "Backend API Proxy: Requests are routed through a dedicated local proxy to bypass strict browser CORS policies.",
+            "Enforced a precise server-side 1.5-second processing queue per Nominatim's OpenStreetMap usage terms."
+        ]
+    },
+    {
         "version": "1.6.0",
         "date": "2026-02-27",
         "title": "Grid Status Enhancements",
