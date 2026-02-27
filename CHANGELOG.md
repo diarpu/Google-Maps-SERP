@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-02-27
+
+### Grid Status Enhancements Release
+
+#### Added
+- **Interactive Grid Status List:** The Grid Status tab now displays a lightweight interactive MiniMap for each row, avoiding performance issues for large grids.
+- **Address Resolution:** Added reverse geocoding to automatically resolve grid anchor coordinates into full, readable street addresses using OpenStreetMap.
+- **Enlarged Map View:** Clicking the enlarge icon on any row's MiniMap opens a full-screen interactive modal for precise spatial inspection of that specific coordinate.
+
+#### Changed
+- Removed character limits and truncation from the street address display so the full location context is fully visible.
+
+---
+
 ## [1.5.0] - 2026-02-27
 
 ### Timeline, History & One-Click Update Release

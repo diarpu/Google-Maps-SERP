@@ -1,5 +1,16 @@
 [
     {
+        "version": "1.6.0",
+        "date": "2026-02-27",
+        "title": "Grid Status Enhancements",
+        "changes": [
+            "Interactive Grid Status List: Miniature map component for every grid anchor location without performance drops.",
+            "Address Resolution: Reverse geocoding resolves grid coordinates into full, readable street addresses.",
+            "Enlarged Map View: Inspect specific locations in full-screen detail directly from the list view.",
+            "Full Location Context: Removed character limits from addresses allowing complete visibility."
+        ]
+    },
+    {
         "version": "1.5.0",
         "date": "2026-02-27",
         "title": "Timeline, History & One-Click Update",
