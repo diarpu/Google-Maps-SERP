@@ -12,6 +12,7 @@ import { PinInspectionSidebar } from '@/components/scans/PinInspectionSidebar';
 import { BusinessCard } from '@/components/scans/BusinessCard';
 import { TrendChart } from '@/components/scans/TrendChart';
 import { CompetitorIntelligenceDashboard } from '@/components/scans/CompetitorIntelligence';
+import { TimelineBar } from '@/components/scans/TimelineBar';
 
 // Dynamically import Map component to avoid SSR issues with Leaflet
 const MapComponent = dynamic(() => import('@/components/ui/Map'), {
@@ -46,6 +47,12 @@ interface Scan {
     results: Result[];
 }
 
+interface Run {
+    runId: string;
+    runAt: string;
+    resultCount: number;
+}
+
 interface RankedBusiness {
     name: string;
     rank: number;
@@ -67,26 +74,41 @@ export default function ScanReportPage({ params }: { params: Promise<{ id: strin
     const [searchQuery, setSearchQuery] = useState('');
     const [sharing, setSharing] = useState(false);
     const [showHeatmap, setShowHeatmap] = useState(false);
+    const [runs, setRuns] = useState<Run[]>([]);
+    const [activeRunId, setActiveRunId] = useState<string | null>(null);
+
+    const fetchScan = (runId?: string) => {
+        const url = runId
+            ? `/api/scans/${resolvedParams.id}?runId=${runId}`
+            : `/api/scans/${resolvedParams.id}`;
+        fetch(url)
+            .then(res => res.json())
+            .then(data => {
+                setScan(data.scan);
+                if (data.runs) setRuns(data.runs);
+                if (data.activeRunId) setActiveRunId(data.activeRunId);
+            })
+            .catch(console.error)
+            .finally(() => setLoading(false));
+    };
 
     useEffect(() => {
-        const fetchScan = () => {
-            fetch(`/api/scans/${resolvedParams.id}`)
-                .then(res => res.json())
-                .then(data => setScan(data.scan))
-                .catch(console.error)
-                .finally(() => setLoading(false));
-        };
-
         fetchScan();
 
         const interval = setInterval(() => {
             if (scan?.status === 'RUNNING' || scan?.status === 'PENDING') {
-                fetchScan();
+                fetchScan(activeRunId || undefined);
             }
         }, 5000);
 
         return () => clearInterval(interval);
     }, [resolvedParams.id, scan?.status]);
+
+    const handleSelectRun = (runId: string) => {
+        setActiveRunId(runId);
+        setLoading(true);
+        fetchScan(runId);
+    };
 
     if (loading) {
         return (
@@ -230,7 +252,7 @@ export default function ScanReportPage({ params }: { params: Promise<{ id: strin
     };
 
     const handleRerun = async () => {
-        if (!confirm('Clear all results and rerun this scan from scratch?')) return;
+        if (!confirm('Start a new scan run? Previous results will be preserved in the timeline.')) return;
         try {
             setLoading(true);
             const res = await fetch(`/api/scans/${scan.id}/rerun`, {
@@ -297,6 +319,21 @@ export default function ScanReportPage({ params }: { params: Promise<{ id: strin
         }
     };
 
+    const handleCancelSchedule = async () => {
+        if (!confirm('Cancel the recurring schedule? The scan will no longer auto-run.')) return;
+        try {
+            const res = await fetch(`/api/scans/${scan.id}/cancel-schedule`, { method: 'POST' });
+            const data = await res.json();
+            if (res.ok) {
+                setScan((prev: any) => prev ? { ...prev, frequency: 'ONCE', nextRun: null } : prev);
+            } else {
+                throw new Error(data.error || 'Failed to cancel');
+            }
+        } catch (error: any) {
+            alert(`Failed to cancel schedule: ${error.message}`);
+        }
+    };
+
     return (
         <div className="max-w-[1600px] mx-auto space-y-6">
             <ScanHeader
@@ -307,6 +344,14 @@ export default function ScanReportPage({ params }: { params: Promise<{ id: strin
                 onExportXLSX={handleExportXLSX}
                 onExportPDF={handleExportPDF}
                 onShare={handleShare}
+                onCancelSchedule={scan.frequency !== 'ONCE' ? handleCancelSchedule : undefined}
+            />
+
+            {/* Timeline Bar - shows when 2+ runs exist */}
+            <TimelineBar
+                runs={runs}
+                activeRunId={activeRunId}
+                onSelectRun={handleSelectRun}
             />
 
             {/* Visibility Score Card */}

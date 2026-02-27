@@ -1,5 +1,42 @@
 [
     {
+        "version": "1.5.0",
+        "date": "2026-02-27",
+        "title": "Timeline, History & One-Click Update",
+        "changes": [
+            "Scan Timeline: View and switch between previous scan runs without losing history.",
+            "Run History: Re-runs no longer delete old results — each run gets a unique ID.",
+            "Scheduled Scan Info: Header now shows next run date/time and frequency badge.",
+            "Cancel Schedule: One-click button to stop a recurring scan from auto-running.",
+            "One-Click App Update: Update the app from GitHub directly from the update banner.",
+            "Fixed Update Notifier always showing — version is now read dynamically from package.json.",
+            "Fixed map auto-panning when clicking a pin — view stays perfectly still."
+        ]
+    },
+    {
+        "version": "1.4.0",
+        "date": "2026-02-26",
+        "title": "Scanner Accuracy & CID Matching",
+        "changes": [
+            "Fixed critical bug: PlaceId was never saved to the database.",
+            "CID-first business matching: match by CID > PlaceID > strict name.",
+            "Removed 80% token-overlap name matching that caused false positives.",
+            "Numbered rank markers on map (1-20 or X for not found).",
+            "Geographically accurate zip code lookups (bounding-box first)."
+        ]
+    },
+    {
+        "version": "1.3.0",
+        "date": "2026-02-12",
+        "title": "Review Intel & Deep Scraping",
+        "changes": [
+            "Source attribution for every AI insight.",
+            "Deep scraping for businesses with 1700+ reviews.",
+            "CSV export for all review data.",
+            "Fixed 'Zero Reviews' bug and duplicate review deduplication."
+        ]
+    },
+    {
         "version": "1.2.0",
         "date": "2026-02-02",
         "title": "Global Precision Update",
@@ -7,7 +44,7 @@
             "Precision Business Identity: Auto-populate and URL-based imports.",
             "Regional Localization: Dynamic locale/timezone adaptation per scan.",
             "Fail-Safe Scans: Automatic proxy blacklisting and direct fallback.",
-            "Enhanced Al-Insights: Primary threat identification and market share analysis.",
+            "Enhanced AI-Insights: Primary threat identification and market share analysis.",
             "Telemetry Console: Integrated system logs in Settings."
         ]
     },

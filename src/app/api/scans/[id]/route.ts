@@ -7,20 +7,56 @@ export async function GET(
 ) {
     try {
         const { id } = await params;
+        const url = new URL(request.url);
+        const requestedRunId = url.searchParams.get('runId');
 
         const scan = await (prisma as any).scan.findUnique({
             where: { id },
-            include: { results: true },
         });
 
         if (!scan) {
             return NextResponse.json({ error: 'Scan not found' }, { status: 404 });
         }
 
-        return NextResponse.json({ scan });
-    } catch (error) {
-        console.error('Scan GET error:', error);
-        return NextResponse.json({ error: 'Failed to fetch scan' }, { status: 500 });
+        // Get all distinct runs for the timeline using raw SQL
+        // (avoids Prisma client cache issues with new columns)
+        const rawRuns: any[] = await prisma.$queryRawUnsafe(
+            `SELECT runId, MIN(runAt) as runAt, COUNT(*) as resultCount 
+             FROM Result 
+             WHERE scanId = ? 
+             GROUP BY runId 
+             ORDER BY MIN(runAt) ASC`,
+            id
+        );
+
+        const runs = rawRuns.map(r => ({
+            runId: r.runId || `${id}-legacy`,
+            runAt: r.runAt ? new Date(r.runAt).toISOString() : scan.createdAt.toISOString(),
+            resultCount: Number(r.resultCount),
+        }));
+
+        // Determine which run to show
+        const activeRunId = requestedRunId || scan.currentRunId || (runs.length > 0 ? runs[runs.length - 1].runId : null);
+
+        // Fetch results for the active run using raw query
+        const results: any[] = activeRunId
+            ? await prisma.$queryRawUnsafe(
+                `SELECT * FROM Result WHERE scanId = ? AND runId = ?`,
+                id, activeRunId
+            )
+            : await prisma.$queryRawUnsafe(
+                `SELECT * FROM Result WHERE scanId = ?`,
+                id
+            );
+
+        return NextResponse.json({
+            scan: { ...scan, results },
+            runs,
+            activeRunId,
+        });
+    } catch (error: any) {
+        console.error('Scan GET error:', error?.message, error?.stack);
+        return NextResponse.json({ error: 'Failed to fetch scan', details: error?.message }, { status: 500 });
     }
 }
 

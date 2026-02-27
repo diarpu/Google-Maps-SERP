@@ -108,12 +108,16 @@ export async function runScan(scanId: string) {
             return;
         }
 
+        // Generate or reuse the runId for this execution
+        const runId = scan.currentRunId || `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const runAt = new Date();
+
         await prisma.scan.update({
             where: { id: scanId },
-            data: { status: 'RUNNING' },
+            data: { status: 'RUNNING', currentRunId: runId },
         });
 
-        await logger.info(`[Launcher] Status set to RUNNING for keyword: "${scan.keyword}"`, 'SCANNER');
+        await logger.info(`[Launcher] Status set to RUNNING for keyword: "${scan.keyword}" (runId: ${runId})`, 'SCANNER');
 
         const points = scan.customPoints
             ? JSON.parse(scan.customPoints)
@@ -313,6 +317,8 @@ export async function runScan(scanId: string) {
                 await prisma.result.create({
                     data: {
                         scanId: scan.id,
+                        runId,
+                        runAt,
                         lat: point.lat,
                         lng: point.lng,
                         topResults: JSON.stringify([]),
@@ -394,6 +400,8 @@ export async function runScan(scanId: string) {
             await prisma.result.create({
                 data: {
                     scanId: scan.id,
+                    runId,
+                    runAt,
                     lat: point.lat,
                     lng: point.lng,
                     topResults: JSON.stringify(results),

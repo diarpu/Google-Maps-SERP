@@ -22,6 +22,7 @@ model Scan {
   nextRun     DateTime?
   businessName String?     // Name of business to track ranking for (optional)
   placeId     String?     // Google Place ID for accurate tracking
+  currentRunId String?    // ID of the current/latest run (for timeline grouping)
   results     Result[]
 
   @@index([status])
@@ -33,6 +34,8 @@ model Result {
   id           String   @id @default(cuid())
   scanId       String
   scan         Scan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  runId        String?  // Groups results by scan execution (null for legacy results)
+  runAt        DateTime @default(now())  // When this run started
   lat          Float
   lng          Float
   rank         Int?     // Rank of the target business (null if not found)
@@ -43,6 +46,7 @@ model Result {
   capturedAt   DateTime @default(now())
 
   @@index([scanId])
+  @@index([scanId, runId])
 }
 
 model Proxy {

@@ -1,5 +1,5 @@
 import { Badge, Button } from '@/components/ui';
-import { Download, Share2, StopCircle, Trash2, MapPin, Calendar, ChevronLeft, RefreshCw } from 'lucide-react';
+import { Download, Share2, StopCircle, Trash2, MapPin, Calendar, ChevronLeft, RefreshCw, Clock, XCircle } from 'lucide-react';
 import Link from 'next/link';
 
 interface ScanHeaderProps {
@@ -10,9 +10,24 @@ interface ScanHeaderProps {
     onExportXLSX: () => void;
     onExportPDF: () => void;
     onShare: () => void;
+    onCancelSchedule?: () => void;
 }
 
-export function ScanHeader({ scan, onStop, onRerun, onDelete, onExportXLSX, onExportPDF, onShare }: ScanHeaderProps) {
+function formatNextRun(nextRun: string | null) {
+    if (!nextRun) return null;
+    const date = new Date(nextRun);
+    const now = new Date();
+    const diffMs = date.getTime() - now.getTime();
+    if (diffMs < 0) return 'Overdue — will trigger soon';
+    if (diffMs < 60_000) return 'Less than a minute';
+    if (diffMs < 3600_000) return `in ${Math.round(diffMs / 60_000)} min`;
+    if (diffMs < 86400_000) return `in ${Math.round(diffMs / 3600_000)} hours`;
+    return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+
+export function ScanHeader({ scan, onStop, onRerun, onDelete, onExportXLSX, onExportPDF, onShare, onCancelSchedule }: ScanHeaderProps) {
+    const isScheduled = scan.frequency && scan.frequency !== 'ONCE';
+    const nextRunText = formatNextRun(scan.nextRun);
     return (
         <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
@@ -42,6 +57,30 @@ export function ScanHeader({ scan, onStop, onRerun, onDelete, onExportXLSX, onEx
                             <span className="flex items-center gap-1.5"><Calendar size={12} className="text-blue-500" /> {new Date(scan.createdAt).toDateString()}</span>
                         </p>
                     </div>
+                    {/* Schedule Info */}
+                    {isScheduled && (
+                        <div className="flex items-center gap-3 mt-1">
+                            <Badge variant="blue" className="font-black text-[9px] uppercase tracking-widest px-2 py-0.5">
+                                <RefreshCw className="w-3 h-3 mr-1" />
+                                {scan.frequency}
+                            </Badge>
+                            {nextRunText && (
+                                <span className="text-xs text-gray-500 font-medium flex items-center gap-1.5">
+                                    <Clock size={12} className="text-blue-500" />
+                                    Next run: {nextRunText}
+                                </span>
+                            )}
+                            {onCancelSchedule && (
+                                <button
+                                    onClick={onCancelSchedule}
+                                    className="text-[10px] font-bold text-red-500 hover:text-red-700 flex items-center gap-1 uppercase tracking-wider transition-colors"
+                                >
+                                    <XCircle size={12} />
+                                    Cancel Schedule
+                                </button>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
             <div className="flex items-center gap-2">

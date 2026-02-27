@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/prisma';
 import { NextResponse } from 'next/server';
-import { runScan } from '@/lib/scanner';
+import { enqueueScan, isScanActive } from '@/lib/scanQueue';
 import { logger } from '@/lib/logger';
 
 export async function POST(
@@ -21,34 +21,43 @@ export async function POST(
             return NextResponse.json({ error: 'Scan not found' }, { status: 404 });
         }
 
-        // 1. Clear existing results
-        const deletedResults = await (prisma as any).result.deleteMany({
-            where: { scanId: id }
-        });
+        // Guard: prevent rerunning a scan that's already running
+        if (scan.status === 'RUNNING' || isScanActive(id)) {
+            await logger.warn(`Rerun blocked: Scan ${id} is already running`, 'API');
+            return NextResponse.json(
+                { error: 'Scan is already running. Stop it first or wait for it to complete.' },
+                { status: 409 }
+            );
+        }
 
-        // 2. Clear existing alerts for this scan
+        // Generate a new runId for this execution — preserves history!
+        const newRunId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+        // Clear alerts for this scan
         await (prisma as any).alert.deleteMany({
             where: { scanId: id }
         });
 
-        // 3. Reset scan status and nextRun
+        // Reset scan status with the new runId
         const updatedScan = await (prisma as any).scan.update({
             where: { id },
             data: {
                 status: 'PENDING',
-                nextRun: null, // Clear next run so it doesn't conflict
+                currentRunId: newRunId,
+                nextRun: null,
             },
             include: {
-                results: true
+                results: {
+                    where: { runId: newRunId } // Return empty for this new run
+                }
             }
         });
 
-        await logger.info(`Scan ${id} reset. Deleted ${deletedResults.count} results. Triggering scan...`, 'API');
+        await logger.info(`Scan ${id} reset with new runId ${newRunId}. Previous results preserved. Triggering scan...`, 'API');
 
-        // 4. Trigger in background
-        runScan(id).catch(err => {
-            logger.error(`[Rerun] Critical background failure for scan ${id}: ${err.message}`, 'API', { scanId: id, stack: err.stack });
-        });
+        // Trigger via queue (respects concurrency limit)
+        const queueResult = enqueueScan(id);
+        await logger.info(`Scan ${id} rerun enqueued: ${queueResult}`, 'API');
 
         return NextResponse.json({ success: true, scan: updatedScan });
     } catch (error: any) {

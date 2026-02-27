@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-02-27
+
+### Timeline, History & One-Click Update Release
+
+#### Added
+- **Scan Timeline:** Scan detail page now shows a horizontal timeline bar to switch between previous runs. Only visible when a scan has 2+ runs (scheduled repeats or manual reruns).
+- **Run History Preservation:** Re-running a scan no longer deletes old results. Each execution gets a unique `runId` — all history is preserved in the database.
+- **Scheduled Scan Info in Header:** Scheduled scans now display frequency badge (DAILY/WEEKLY), next run countdown, and a "Cancel Schedule" button directly in the scan report header.
+- **One-Click App Update:** The update notification banner now has a "Get Update" button that runs `git pull → pnpm install → prisma db push` in the background and shows a live terminal log — no command line needed.
+- **Cancel Schedule Endpoint:** `POST /api/scans/[id]/cancel-schedule` sets frequency to ONCE and clears nextRun.
+- **Dynamic Version Check:** `GET /api/system/update` returns the local `package.json` version so the update banner always shows the correct current version.
+
+#### Fixed
+- **Update Banner Always Showing:** `CURRENT_VERSION` was hardcoded to `1.2.0` in the component — now fetched dynamically from the server, so it only shows when there is actually a newer version on GitHub.
+- **Map Auto-Pan on Pin Click:** Prior fix using `requestAnimationFrame` + `map.setView` to freeze position was reinforced with `bubblingMouseEvents={false}`.
+
+---
+
 ## [1.4.0] - 2026-02-27
 
 ### Scanner Accuracy & CID Matching Release
