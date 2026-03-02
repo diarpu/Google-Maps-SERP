@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { exportReviewsToXLSX, exportReviewsToJSON, exportReviewsToPDF } from '@/lib/reviewExport';
 import {
     ArrowLeft, Star, Shield, MessageSquareText, TrendingUp,
     AlertTriangle, CheckCircle, Users, BarChart3, Clock, Target,
@@ -14,7 +15,7 @@ import {
     ArrowUpRight, ArrowDownRight, Minus, Camera, Hash, Quote,
     CircleDot, BrainCircuit, Fingerprint, Scale, Megaphone,
     PenTool, Activity, Trophy, CircleAlert, Info, ShieldX,
-    Table, X
+    Table, X, RefreshCw, FileJson, Image as ImageLucide
 } from 'lucide-react';
 
 export default function ReviewResultsPage() {
@@ -26,6 +27,11 @@ export default function ReviewResultsPage() {
     const [sentimentFilter, setSentimentFilter] = useState<string | null>(null);
     const [showAllReviews, setShowAllReviews] = useState(false);
     const [exporting, setExporting] = useState(false);
+    const [activeRunId, setActiveRunId] = useState<string | null>(null);
+    const [rerunning, setRerunning] = useState(false);
+    const [rerunLogs, setRerunLogs] = useState<{ msg: string; type: 'info' | 'error' | 'success' }[]>([]);
+    const [showRerunTerminal, setShowRerunTerminal] = useState(false);
+    const [rerunTerminalCollapsed, setRerunTerminalCollapsed] = useState(false);
 
     useEffect(() => {
         fetchData();
@@ -35,12 +41,64 @@ export default function ReviewResultsPage() {
         return () => clearInterval(interval);
     }, []);
 
-    async function fetchData() {
+    async function fetchData(runId?: string) {
         try {
-            const res = await fetch(`/api/reviews/${params.id}`);
+            const qs = runId ? `?runId=${runId}` : '';
+            const res = await fetch(`/api/reviews/${params.id}${qs}`);
             const json = await res.json();
             setData(json);
+            if (json.activeRunId && !activeRunId) {
+                setActiveRunId(json.activeRunId);
+            }
         } catch { /* ignore */ } finally { setLoading(false); }
+    }
+
+    function switchRun(runId: string) {
+        setActiveRunId(runId);
+        fetchData(runId);
+    }
+
+    async function rerunAnalysis() {
+        if (!data) return;
+        if (!confirm(`Rerun analysis for "${data.businessName}"? This will scrape fresh reviews.`)) return;
+        setRerunning(true);
+        setRerunLogs([]);
+        setShowRerunTerminal(true);
+        setRerunTerminalCollapsed(false);
+
+        try {
+            const res = await fetch(`/api/reviews/${params.id}/rerun`, { method: 'POST' });
+            if (!res.body) throw new Error('No response body');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const parsed = JSON.parse(line.slice(6));
+                            if (parsed.msg) {
+                                setRerunLogs(prev => [...prev, { msg: parsed.msg, type: parsed.type }]);
+                            }
+                        } catch { /* ignore */ }
+                    }
+                }
+            }
+
+            setRerunning(false);
+            setTimeout(() => {
+                setShowRerunTerminal(false);
+                fetchData(); // reload with latest run
+            }, 2000);
+        } catch (err: any) {
+            setRerunLogs(prev => [...prev, { msg: `Error: ${err.message}`, type: 'error' }]);
+            setRerunning(false);
+        }
     }
 
     // Filter reviews
@@ -68,77 +126,20 @@ export default function ReviewResultsPage() {
         return reviews;
     }, [data?.reviews, searchQuery, ratingFilter, sentimentFilter]);
 
-    // CSV Export
-    function exportCSV() {
+    async function handleExportXLSX() {
         if (!data) return;
-        const analysis = JSON.parse(data.analysisData || '{}');
-        const { overview, sentiment, ratings, responses, legitimacy, content, temporal } = analysis;
-        const reviews = data.reviews || [];
+        setExporting(true);
+        try { await exportReviewsToXLSX(data); } catch (e) { console.error(e); } finally { setExporting(false); }
+    }
 
-        // Section 1: Reviews
-        const reviewHeaders = ['Reviewer Name', 'Rating', 'Review Text', 'Response Text', 'Date', 'Sentiment', 'Sentiment Score', 'Fake Score', 'Is Fake', 'Review Count', 'Photo Count'];
-        const reviewRows = reviews.map((r: any) => [
-            r.reviewerName || '', r.rating || '', (r.text || '').replace(/[\r\n]+/g, ' ').replace(/"/g, '""'),
-            (r.responseText || '').replace(/[\r\n]+/g, ' ').replace(/"/g, '""'),
-            r.publishedDate || '', r.sentimentLabel || '', r.sentimentScore ?? '', r.fakeScore ?? '',
-            r.isLikelyFake ? 'Yes' : 'No', r.reviewCount || '', r.photoCount || ''
-        ]);
+    function handleExportJSON() {
+        if (!data) return;
+        exportReviewsToJSON(data);
+    }
 
-        // Section 2: Metrics
-        const metricsRows: [string, string][] = [];
-        if (overview) {
-            metricsRows.push(['Health Score', overview.healthScore], ['Grade', overview.gradeLabel],
-                ['Average Rating', overview.averageRating], ['Total Reviews', overview.totalReviews],
-                ['NPS', overview.netPromoterScore ?? ''], ['CSI', `${overview.customerSatisfactionIndex ?? 0}%`],
-                ['Response Rate', `${overview.responseRate}%`], ['Fake Review %', `${overview.fakeReviewPercentage}%`],
-                ['Authenticity Score', `${overview.reviewAuthenticityScore ?? 0}%`],
-                ['Engagement Score', `${overview.engagementScore ?? 0}%`],
-                ['Momentum', overview.reputationMomentum || 'STABLE'],
-                ['Sentiment Score', overview.sentimentScore]);
-        }
-        if (sentiment) {
-            metricsRows.push(['Positive Reviews', sentiment.positiveCount], ['Negative Reviews', sentiment.negativeCount],
-                ['Neutral Reviews', sentiment.neutralCount], ['Rating-Text Alignment', `${sentiment.ratingTextAlignment}%`],
-                ['Sarcasm Suspects', sentiment.sarcasmSuspectCount ?? 0]);
-        }
-        if (ratings) {
-            metricsRows.push(['5-Star Ratio', `${ratings.fiveStarRatio}%`], ['1-Star Ratio', `${ratings.oneStarRatio}%`],
-                ['Rating Trend', ratings.improvingOrDeclining], ['Velocity', `${ratings.ratingVelocity}/mo`]);
-        }
-        if (responses) {
-            metricsRows.push(['Response Rate', `${responses.responseRate}%`],
-                ['Neg Response Rate', `${responses.responseRateNegative}%`],
-                ['Empathy Score', `${responses.empathyScore}/100`],
-                ['Template Detection', `${responses.templateDetectionRate}%`]);
-        }
-        if (legitimacy) {
-            metricsRows.push(['Trust Score', `${legitimacy.overallTrustScore}/100`],
-                ['Suspicious %', `${legitimacy.suspiciousPercentage}%`],
-                ['Local Guide %', `${legitimacy.localGuidePercentage ?? 0}%`],
-                ['1-Review Accounts %', `${legitimacy.oneReviewPercentage}%`],
-                ['Rating-Only %', `${legitimacy.ratingOnlyPercentage}%`]);
-        }
-
-        // Build CSV string
-        const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-        let csv = 'REVIEW INTELLIGENCE REPORT\n';
-        csv += `Business: ${data.businessName}\n`;
-        csv += `Generated: ${new Date(data.createdAt).toLocaleDateString()}\n\n`;
-
-        csv += '=== INDIVIDUAL REVIEWS ===\n';
-        csv += reviewHeaders.map(esc).join(',') + '\n';
-        reviewRows.forEach((row: any[]) => { csv += row.map(esc).join(',') + '\n'; });
-
-        csv += '\n=== METRICS SUMMARY ===\n';
-        csv += 'Metric,Value\n';
-        metricsRows.forEach(([k, v]) => { csv += `${esc(k)},${esc(v)}\n`; });
-
-        // Download
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = `${data.businessName?.replace(/[^a-zA-Z0-9]/g, '_') || 'reviews'}_export.csv`;
-        a.click(); URL.revokeObjectURL(url);
+    function handleExportPDF() {
+        if (!data) return;
+        exportReviewsToPDF(data);
     }
 
     // Find reviews matching a keyword/phrase for source attribution
@@ -381,23 +382,42 @@ export default function ReviewResultsPage() {
                 </div>
 
                 <div className="flex items-center gap-3">
-                    {/* PDF Export Button */}
+                    {/* Rerun Button */}
                     <button
-                        onClick={exportPDF}
+                        onClick={rerunAnalysis}
+                        disabled={rerunning}
+                        className="px-4 py-2.5 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-semibold hover:bg-emerald-100 disabled:opacity-50 transition-colors flex items-center gap-2"
+                    >
+                        {rerunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                        {rerunning ? 'Running...' : 'Rerun'}
+                    </button>
+
+                    {/* XLSX Export Button */}
+                    <button
+                        onClick={handleExportXLSX}
                         disabled={exporting}
                         className="px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-xs font-semibold hover:bg-gray-50 transition-colors flex items-center gap-2"
                     >
-                        {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                        Export PDF
+                        {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Table className="w-4 h-4" />}
+                        {exporting ? 'Exporting...' : 'XLSX'}
                     </button>
 
-                    {/* CSV Export Button */}
+                    {/* JSON Export Button */}
                     <button
-                        onClick={exportCSV}
+                        onClick={handleExportJSON}
                         className="px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-xs font-semibold hover:bg-gray-50 transition-colors flex items-center gap-2"
                     >
-                        <Table className="w-4 h-4" />
-                        Export CSV
+                        <FileJson className="w-4 h-4" />
+                        JSON
+                    </button>
+
+                    {/* PDF Export Button */}
+                    <button
+                        onClick={handleExportPDF}
+                        className="px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl text-xs font-semibold hover:bg-gray-50 transition-colors flex items-center gap-2"
+                    >
+                        <Download className="w-4 h-4" />
+                        PDF Report
                     </button>
 
                     {/* Health Score */}
@@ -412,6 +432,36 @@ export default function ReviewResultsPage() {
                     )}
                 </div>
             </div>
+
+            {/* ==================== RUN TIMELINE ==================== */}
+            {data.runs && data.runs.length > 1 && (
+                <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                        <Clock className="w-4 h-4 text-violet-500" />
+                        <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">Run History</h3>
+                        <span className="text-[10px] text-gray-400 ml-auto">{data.runs.length} runs</span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        {data.runs.map((run: any) => (
+                            <button
+                                key={run.runId}
+                                onClick={() => switchRun(run.runId)}
+                                className={`px-3 py-2 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 ${activeRunId === run.runId
+                                    ? 'bg-violet-600 text-white shadow-sm shadow-violet-200'
+                                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                    }`}
+                            >
+                                <CalendarDays className="w-3 h-3" />
+                                {new Date(run.runAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: '2-digit' })}
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${activeRunId === run.runId ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-500'
+                                    }`}>
+                                    {run.reviewCount} reviews
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* ==================== OVERVIEW STATS ==================== */}
             {overview && (
@@ -600,48 +650,18 @@ export default function ReviewResultsPage() {
                 </Section>
             )}
 
-            {/* ==================== LEGITIMACY & LOCAL GUIDES ==================== */}
+            {/* ==================== LEGITIMACY ==================== */}
             {legitimacy && (
-                <Section title="Reviewer Legitimacy & Local Guides" icon={<Shield className="w-4 h-4 text-violet-500" />}>
+                <Section title="Reviewer Legitimacy" icon={<Shield className="w-4 h-4 text-violet-500" />}>
                     <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
                         <StatCard icon={<Shield className="w-3 h-3" />} label="Trust Score" value={`${legitimacy.overallTrustScore}/100`} color={legitimacy.overallTrustScore > 70 ? 'green' : 'red'} />
                         <StatCard icon={<ShieldX className="w-3 h-3" />} label="Suspicious" value={`${legitimacy.totalSuspicious} (${legitimacy.suspiciousPercentage}%)`} color={legitimacy.suspiciousPercentage > 15 ? 'red' : 'green'} />
-                        <StatCard icon={<MapPin className="w-3 h-3" />} label="Local Guides" value={`${legitimacy.localGuideCount ?? 0} (${legitimacy.localGuidePercentage ?? 0}%)`} color={(legitimacy.localGuidePercentage ?? 0) > 30 ? 'green' : 'amber'} />
+
                         <StatCard icon={<UserX className="w-3 h-3" />} label="1-Review Accts" value={`${legitimacy.oneReviewPercentage}%`} color={legitimacy.oneReviewPercentage > 40 ? 'red' : 'green'} />
                         <StatCard icon={<Star className="w-3 h-3" />} label="Rating-Only" value={`${legitimacy.ratingOnlyPercentage}%`} color="amber" />
                     </div>
 
-                    {/* Local Guide Distribution */}
-                    {(() => {
-                        // Use analysis data if available, otherwise compute from reviews
-                        let lgDist = legitimacy.localGuideDistribution;
-                        if ((!lgDist || lgDist.length === 0) && data?.reviews?.length) {
-                            const counts: Record<string, number> = {};
-                            data.reviews.forEach((r: any) => {
-                                const key = r.localGuideLevel ? `Level ${r.localGuideLevel}` : 'Not a Local Guide';
-                                counts[key] = (counts[key] || 0) + 1;
-                            });
-                            lgDist = Object.entries(counts).map(([level, count]) => ({
-                                level, count, percentage: ((count as number) / data.reviews.length * 100).toFixed(1)
-                            }));
-                        }
-                        if (!lgDist?.length) return null;
-                        return (
-                            <div className="mb-4">
-                                <p className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5"><MapPin className="w-3 h-3 text-violet-500" /> Local Guide Distribution</p>
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                    {lgDist.map((lg: any) => (
-                                        <div key={lg.level} className={`rounded-xl p-3 text-center ${lg.level === 'Not a Local Guide' ? 'bg-gray-50' : 'bg-violet-50'}`}>
-                                            <p className="text-[10px] font-semibold text-gray-500">{lg.level}</p>
-                                            <p className="text-lg font-bold text-gray-800">{lg.count}</p>
-                                            <p className="text-[10px] text-gray-500">{lg.percentage}%</p>
-                                        </div>
-                                    ))}
-                                </div>
-                                <SourceReviews reviews={(data?.reviews || []).filter((r: any) => r.localGuideLevel).slice(0, 10)} label="Local Guides" />
-                            </div>
-                        );
-                    })()}
+
 
                     <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
                         <StatCard icon={<Users className="w-3 h-3" />} label="Reviewer Diversity" value={legitimacy.reviewerDiversityIndex ?? 'N/A'} color="blue" />
@@ -923,7 +943,7 @@ export default function ReviewResultsPage() {
                         <div key={r.id} className={`border rounded-xl p-4 transition-colors ${r.isLikelyFake ? 'border-red-300 bg-red-50/30 ring-1 ring-red-200' : 'border-gray-200 hover:border-gray-300'}`}>
                             <div className="flex items-center justify-between mb-2">
                                 <div className="flex items-center gap-2">
-                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${r.localGuideLevel ? 'bg-violet-100 text-violet-600' : 'bg-gray-100 text-gray-500'}`}>
+                                    <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold bg-gray-100 text-gray-500">
                                         {r.reviewerName?.charAt(0) || '?'}
                                     </div>
                                     <div className="flex-1">
@@ -1013,6 +1033,51 @@ export default function ReviewResultsPage() {
                     </button>
                 )}
             </Section>
+
+            {/* Floating Rerun Terminal Widget */}
+            {showRerunTerminal && (
+                <div className={`fixed bottom-6 right-6 z-50 transition-all duration-300 ${rerunTerminalCollapsed ? 'w-64' : 'w-[380px] sm:w-[450px]'} pointer-events-none`}>
+                    <div className="bg-[#1e1e1e] rounded-2xl shadow-2xl overflow-hidden border border-white/10 flex flex-col max-h-[500px] pointer-events-auto">
+                        <div className="bg-[#2d2d2d] px-4 py-3 flex items-center justify-between shrink-0 border-b border-white/5 cursor-pointer" onClick={() => setRerunTerminalCollapsed(!rerunTerminalCollapsed)}>
+                            <div className="flex items-center gap-2">
+                                <div className="flex gap-1.5">
+                                    <div className="w-2.5 h-2.5 rounded-full bg-red-500/30" />
+                                    <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/30" />
+                                    <div className="w-2.5 h-2.5 rounded-full bg-green-500/30" />
+                                </div>
+                                <span className="ml-2 text-[10px] text-gray-400 font-mono uppercase tracking-wider">
+                                    {rerunTerminalCollapsed ? 'Rerun Paused' : 'Rerun Console'}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                {rerunning && <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
+                                <button className="p-1 hover:bg-white/10 rounded transition-colors">
+                                    {rerunTerminalCollapsed ? <ChevronUp className="w-3.5 h-3.5 text-gray-400" /> : <ChevronDown className="w-3.5 h-3.5 text-gray-400" />}
+                                </button>
+                            </div>
+                        </div>
+                        {!rerunTerminalCollapsed && (
+                            <div className="p-4 overflow-y-auto font-mono text-[11px] space-y-1.5 flex-1 bg-black/40 backdrop-blur-md h-[300px]">
+                                {rerunLogs.map((log, i) => (
+                                    <div key={i} className={`flex items-start gap-2 ${log.type === 'error' ? 'text-red-400' :
+                                        log.type === 'success' ? 'text-green-400' :
+                                            log.msg.includes('Loaded') ? 'text-blue-300' : 'text-gray-300'
+                                        }`}>
+                                        <span className="opacity-30 select-none whitespace-nowrap">{new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                                        <span className="break-all">{log.msg}</span>
+                                    </div>
+                                ))}
+                                {rerunning && (
+                                    <div className="text-gray-500 animate-pulse flex items-center gap-1">
+                                        <span className="w-1.5 h-3 bg-gray-500" />
+                                    </div>
+                                )}
+                                <div id="rerun-terminal-end" />
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

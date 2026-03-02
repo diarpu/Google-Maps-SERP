@@ -101,6 +101,7 @@ model ReviewAnalysis {
   analysisData  String?  // Full JSON blob of 100+ metrics
   status        String   @default("PENDING") // PENDING, SCRAPING, ANALYZING, COMPLETED, FAILED
   error         String?
+  currentRunId  String?  // ID of the current/latest run (for history)
   createdAt     DateTime @default(now())
   reviews       Review[]
 
@@ -112,6 +113,8 @@ model Review {
   id              String   @id @default(cuid())
   analysisId      String
   analysis        ReviewAnalysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+  runId           String?  // Groups reviews by analysis run (null for legacy)
+  runAt           DateTime @default(now()) // When this run was executed
   reviewerName    String
   reviewerUrl     String?
   reviewImage     String?
@@ -129,4 +132,5 @@ model Review {
   analysisBlob    String?
 
   @@index([analysisId])
+  @@index([analysisId, runId])
 }

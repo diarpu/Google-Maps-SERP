@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
     MessageSquareText, Plus, Search, Star, Clock, AlertTriangle,
-    CheckCircle, Trash2, ExternalLink, Loader2, MapPin, Building2, X, ChevronDown, ChevronUp
+    CheckCircle, Trash2, ExternalLink, Loader2, MapPin, Building2, X, ChevronDown, ChevronUp, RefreshCw
 } from 'lucide-react';
 
 interface ReviewAnalysisSummary {
@@ -100,17 +100,25 @@ export default function ReviewsPage() {
         setError('');
         setLogs([]);
         setShowTerminal(true);
+        setTerminalCollapsed(false);
+
+        // Close the modal immediately — terminal takes over
+        const savedUrl = previewUrl;
+        const savedPreview = { ...preview };
+        setPreview(null);
+        setPreviewUrl('');
+        setUrl('');
 
         try {
             const res = await fetch('/api/reviews', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    url: previewUrl,
-                    businessName: preview.name,
-                    totalReviews: preview.totalReviews,
-                    averageRating: preview.averageRating,
-                    placeId: preview.placeId,
+                    url: savedUrl,
+                    businessName: savedPreview.name,
+                    totalReviews: savedPreview.totalReviews,
+                    averageRating: savedPreview.averageRating,
+                    placeId: savedPreview.placeId,
                 }),
             });
 
@@ -141,12 +149,9 @@ export default function ReviewsPage() {
                 }
             }
 
-            setUrl('');
-            setPreview(null);
-            setPreviewUrl('');
             setSubmitting(false);
 
-            // Keep terminal open for a moment to show success
+            // Keep terminal open for a moment to show success, then refresh list
             setTimeout(() => {
                 setShowTerminal(false);
                 fetchAnalyses();
@@ -163,6 +168,48 @@ export default function ReviewsPage() {
         if (!confirm('Delete this analysis?')) return;
         await fetch(`/api/reviews/${id}`, { method: 'DELETE' });
         fetchAnalyses();
+    }
+
+    async function rerunAnalysis(id: string, businessName: string) {
+        if (!confirm(`Rerun analysis for "${businessName}"? This will scrape fresh reviews.`)) return;
+        setSubmitting(true);
+        setLogs([]);
+        setShowTerminal(true);
+        setTerminalCollapsed(false);
+
+        try {
+            const res = await fetch(`/api/reviews/${id}/rerun`, { method: 'POST' });
+            if (!res.body) throw new Error('No response body');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            if (data.msg) {
+                                setLogs(prev => [...prev, { msg: data.msg, type: data.type }]);
+                            }
+                        } catch { /* ignore */ }
+                    }
+                }
+            }
+
+            setSubmitting(false);
+            setTimeout(() => {
+                setShowTerminal(false);
+                fetchAnalyses();
+            }, 2000);
+        } catch (err: any) {
+            setLogs(prev => [...prev, { msg: `Error: ${err.message}`, type: 'error' }]);
+            setSubmitting(false);
+        }
     }
 
     const statusIcon = (status: string) => {
@@ -362,15 +409,35 @@ export default function ReviewsPage() {
                                     {/* Actions */}
                                     <div className="flex items-center gap-2">
                                         {a.status === 'COMPLETED' && (
-                                            <Link href={`/reviews/${a.id}`}>
-                                                <button className="px-4 py-2 bg-violet-50 text-violet-600 rounded-lg text-xs font-semibold hover:bg-violet-100 transition-colors flex items-center gap-1.5">
-                                                    <ExternalLink className="w-3 h-3" />
-                                                    View Report
+                                            <>
+                                                <Link href={`/reviews/${a.id}`}>
+                                                    <button className="px-4 py-2 bg-violet-50 text-violet-600 rounded-lg text-xs font-semibold hover:bg-violet-100 transition-colors flex items-center gap-1.5">
+                                                        <ExternalLink className="w-3 h-3" />
+                                                        View Report
+                                                    </button>
+                                                </Link>
+                                                <button
+                                                    onClick={() => rerunAnalysis(a.id, a.businessName)}
+                                                    disabled={submitting}
+                                                    className="p-2 text-emerald-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
+                                                    title="Rerun analysis"
+                                                >
+                                                    <RefreshCw className="w-4 h-4" />
                                                 </button>
-                                            </Link>
+                                            </>
                                         )}
                                         {a.status === 'FAILED' && (
-                                            <span className="text-xs text-red-500 max-w-[200px] truncate">{a.error}</span>
+                                            <>
+                                                <span className="text-xs text-red-500 max-w-[200px] truncate">{a.error}</span>
+                                                <button
+                                                    onClick={() => rerunAnalysis(a.id, a.businessName)}
+                                                    disabled={submitting}
+                                                    className="px-3 py-2 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-semibold hover:bg-emerald-100 transition-colors flex items-center gap-1.5"
+                                                    title="Retry analysis"
+                                                >
+                                                    <RefreshCw className="w-3 h-3" /> Retry
+                                                </button>
+                                            </>
                                         )}
                                         <button
                                             onClick={() => deleteAnalysis(a.id)}

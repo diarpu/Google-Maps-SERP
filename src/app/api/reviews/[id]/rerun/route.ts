@@ -4,41 +4,20 @@ import { scrapeGoogleReviews } from '@/lib/reviewScraper';
 import { analyzeReviews } from '@/lib/reviewAnalyzer';
 import { analyzeSentiment } from '@/lib/sentimentEngine';
 
-export async function GET() {
-    try {
-        const analyses = await prisma.reviewAnalysis.findMany({
-            orderBy: { createdAt: 'desc' },
-            select: {
-                id: true,
-                businessName: true,
-                businessUrl: true,
-                totalReviews: true,
-                averageRating: true,
-                status: true,
-                error: true,
-                createdAt: true,
-            }
-        });
-        return NextResponse.json(analyses);
-    } catch (error: any) {
-        console.error('GET /api/reviews error:', error);
-        return NextResponse.json([], { status: 200 });
-    }
-}
-
-export async function POST(req: Request) {
+export async function POST(
+    req: Request,
+    { params }: { params: Promise<{ id: string }> }
+) {
     const encoder = new TextEncoder();
     const customReadable = new TransformStream();
     const writer = customReadable.writable.getWriter();
 
-    // Helper to send progress logs
     const sendLog = async (msg: string, type: 'info' | 'error' | 'success' = 'info') => {
         try {
             await writer.write(encoder.encode(`data: ${JSON.stringify({ msg, type })}\n\n`));
         } catch { /* connection closed */ }
     };
 
-    // Helper to send final result
     const sendResult = async (data: any) => {
         try {
             await writer.write(encoder.encode(`data: ${JSON.stringify({ result: data, type: 'complete' })}\n\n`));
@@ -46,51 +25,54 @@ export async function POST(req: Request) {
         } catch { /* connection closed */ }
     };
 
-    // Run analysis loosely detached but piping logs
     (async () => {
         try {
-            const body = await req.json();
-            const { url, businessName, totalReviews, averageRating, placeId } = body;
+            const { id } = await params;
 
-            if (!url || typeof url !== 'string') {
-                await sendLog('Business URL is required', 'error');
+            // Fetch existing analysis
+            const analysis = await prisma.reviewAnalysis.findUnique({
+                where: { id },
+            });
+
+            if (!analysis) {
+                await sendLog('Analysis not found', 'error');
                 await writer.close();
                 return;
             }
 
-            // Create entry
-            await sendLog(`Creating analysis record for "${businessName}"...`);
-            const analysis = await prisma.reviewAnalysis.create({
-                data: {
-                    businessName: businessName || 'Unknown Business',
-                    businessUrl: url,
-                    totalReviews: totalReviews || 0,
-                    averageRating: averageRating || 0,
-                    placeId: placeId || null,
-                    status: 'SCRAPING',
-                },
-            });
+            if (analysis.status === 'SCRAPING' || analysis.status === 'ANALYZING') {
+                await sendLog('Analysis is already running', 'error');
+                await writer.close();
+                return;
+            }
 
-            const runId = `${analysis.id}-run0`;
+            // Count existing runs via raw SQL (Prisma client doesn't know new fields)
+            const existingRuns: any[] = await prisma.$queryRawUnsafe(
+                `SELECT DISTINCT runId FROM Review WHERE analysisId = ?`,
+                id
+            );
+            const runNumber = existingRuns.length;
+            const newRunId = `${id}-run${runNumber}`;
             const runAt = new Date().toISOString();
 
-            // Set the initial currentRunId via raw SQL (Prisma client doesn't know this field)
+            await sendLog(`Starting rerun #${runNumber + 1} for "${analysis.businessName}"...`);
+
+            // Update analysis status + currentRunId via raw SQL
             await prisma.$executeRawUnsafe(
-                `UPDATE ReviewAnalysis SET currentRunId = ? WHERE id = ?`,
-                runId, analysis.id
+                `UPDATE ReviewAnalysis SET status = 'SCRAPING', currentRunId = ?, error = NULL WHERE id = ?`,
+                newRunId, id
             );
 
-            // Start scraping
-            await sendLog(`Starting scrape for ${url}...`);
-
-            // Pass a progress callback that writes to the stream
+            // Scrape fresh reviews
+            await sendLog(`Scraping reviews from ${analysis.businessUrl}...`);
             const onProgress = (msg: string) => sendLog(msg);
-
-            const { business, reviews } = await scrapeGoogleReviews(url, onProgress);
+            const { business, reviews } = await scrapeGoogleReviews(analysis.businessUrl, onProgress);
 
             await sendLog(`Scraped ${reviews.length} reviews. Saving to database...`);
+
+            // Update business info via standard Prisma (these fields are known)
             await prisma.reviewAnalysis.update({
-                where: { id: analysis.id },
+                where: { id },
                 data: {
                     businessName: business.name,
                     totalReviews: business.totalReviews,
@@ -100,7 +82,7 @@ export async function POST(req: Request) {
                 },
             });
 
-            // Save reviews in chunks via raw SQL (runId/runAt are new fields)
+            // Save reviews with new runId via raw SQL INSERT
             const chunkSize = 50;
             for (let i = 0; i < reviews.length; i += chunkSize) {
                 const chunk = reviews.slice(i, i + chunkSize);
@@ -108,8 +90,8 @@ export async function POST(req: Request) {
                     await prisma.$executeRawUnsafe(
                         `INSERT INTO Review (id, analysisId, runId, runAt, reviewerName, reviewerUrl, reviewImage, reviewCount, photoCount, rating, text, publishedDate, responseText, responseDate, sentimentScore, sentimentLabel, isLikelyFake, fakeScore)
                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, NULL)`,
-                        `${analysis.id}-r0-${i + chunk.indexOf(r)}`,
-                        analysis.id, runId, runAt,
+                        `${id}-${newRunId}-${i + chunk.indexOf(r)}`,
+                        id, newRunId, runAt,
                         r.reviewerName || '', r.reviewerUrl || null, r.reviewImage || null,
                         r.reviewCount ?? null, r.photoCount ?? null, r.rating,
                         r.text || null, r.publishedDate || null,
@@ -119,21 +101,21 @@ export async function POST(req: Request) {
                 await sendLog(`Saved ${Math.min(i + chunkSize, reviews.length)} / ${reviews.length} reviews...`);
             }
 
+            // Re-analyze
             await sendLog('Running 150+ metric deep analysis...');
             const analysisResult = analyzeReviews(reviews);
 
-            // Sentiment enrichment
+            // Sentiment enrichment — fetch new run's reviews via raw SQL
             await sendLog('Analyzing sentiment and fake patterns...');
-            const dbReviews = await prisma.review.findMany({
-                where: { analysisId: analysis.id },
-                select: { id: true, text: true, rating: true, reviewCount: true, photoCount: true }
-            });
+            const dbReviews: any[] = await prisma.$queryRawUnsafe(
+                `SELECT id, text, rating, reviewCount, photoCount FROM Review WHERE analysisId = ? AND runId = ?`,
+                id, newRunId
+            );
 
-            // Batch sentiment updates (50 per transaction) instead of 1-by-1
             const SENTIMENT_BATCH_SIZE = 50;
             for (let i = 0; i < dbReviews.length; i += SENTIMENT_BATCH_SIZE) {
                 const batch = dbReviews.slice(i, i + SENTIMENT_BATCH_SIZE);
-                const updates = batch.map(r => {
+                for (const r of batch) {
                     const sent = analyzeSentiment(r.text, r.rating);
 
                     let fakeScore = 0;
@@ -144,36 +126,38 @@ export async function POST(req: Request) {
                     if (r.text && r.rating === 5 && sent.label === 'NEGATIVE') fakeScore += 15;
                     if (r.text && r.rating === 1 && sent.label === 'POSITIVE') fakeScore += 15;
 
-                    return prisma.review.update({
-                        where: { id: r.id },
-                        data: {
-                            sentimentScore: sent.compound,
-                            sentimentLabel: sent.label,
-                            fakeScore: Math.min(fakeScore, 100),
-                            isLikelyFake: fakeScore >= 50,
-                        },
-                    });
-                });
-
-                await prisma.$transaction(updates);
+                    await prisma.$executeRawUnsafe(
+                        `UPDATE Review SET sentimentScore = ?, sentimentLabel = ?, fakeScore = ?, isLikelyFake = ? WHERE id = ?`,
+                        sent.compound, sent.label, Math.min(fakeScore, 100), fakeScore >= 50 ? 1 : 0, r.id
+                    );
+                }
 
                 if (i % 200 === 0) await sendLog(`Analyzed ${Math.min(i + SENTIMENT_BATCH_SIZE, dbReviews.length)} / ${dbReviews.length} reviews...`);
             }
 
             await prisma.reviewAnalysis.update({
-                where: { id: analysis.id },
+                where: { id },
                 data: {
                     analysisData: JSON.stringify(analysisResult),
                     status: 'COMPLETED',
                 },
             });
 
-            await sendLog(`Analysis complete! Redirecting...`, 'success');
-            await sendResult(analysis);
+            await sendLog(`Rerun complete! ${reviews.length} reviews analyzed.`, 'success');
+            await sendResult({ id: analysis.id });
 
         } catch (error: any) {
-            console.error('Stream error:', error);
+            console.error('Rerun error:', error);
             await sendLog(`Error: ${error.message}`, 'error');
+
+            try {
+                const { id } = await params;
+                await prisma.reviewAnalysis.update({
+                    where: { id },
+                    data: { status: 'FAILED', error: error.message },
+                });
+            } catch { /* ignore */ }
+
             await writer.close();
         }
     })();
