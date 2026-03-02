@@ -338,98 +338,389 @@ async function sortReviewsByNewest(page: Page): Promise<void> {
     }
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════
+ * NETWORK INTERCEPTION PARSER
+ * ═══════════════════════════════════════════════════════════════
+ * Google Maps loads reviews via XHR requests. The response body
+ * starts with ")]}'" followed by a nested JSON array.
+ * Reviews are embedded deep in this structure.
+ * 
+ * This parser extracts reviews directly from the API payload —
+ * no DOM parsing needed (faster, more reliable, doesn't break
+ * when Google changes CSS class names).
+ * ═══════════════════════════════════════════════════════════════
+ */
+
+function parseReviewsFromNetworkResponse(body: string): { reviews: ScrapedReview[], nextPageToken: string | null } {
+    const reviews: ScrapedReview[] = [];
+    let nextPageToken: string | null = null;
+
+    try {
+        // Google prepends ")]}'" or similar safety prefix to JSON responses
+        let jsonStr = body;
+        const prefixMatch = jsonStr.match(/^\)?\]?\}?'?\s*\n?/);
+        if (prefixMatch) {
+            jsonStr = jsonStr.slice(prefixMatch[0].length);
+        }
+        // Also try stripping common Google API prefixes
+        if (jsonStr.startsWith(")]}'")) {
+            jsonStr = jsonStr.slice(4);
+        } else if (jsonStr.startsWith(")]}'\\n")) {
+            jsonStr = jsonStr.slice(5);
+        }
+
+        const data = JSON.parse(jsonStr);
+
+        // The response is a deeply nested array. We need to find review entries.
+        // Strategy: recursively search for arrays that look like review data.
+        // A review entry typically has a structure with rating (1-5), text, name, date.
+
+        const extractedReviews = findReviewsInNestedArray(data);
+        reviews.push(...extractedReviews);
+
+        // Try to find the pagination token — it's usually a base64-like string
+        // deep in the response that changes between pages
+        nextPageToken = findPaginationToken(data);
+
+    } catch (e) {
+        // Not a valid review response — ignore
+    }
+
+    return { reviews, nextPageToken };
+}
+
+/**
+ * Recursively search a deeply nested Google Maps API response for review data.
+ * Reviews in the wire format typically appear as arrays where:
+ * - One element is a sub-array containing reviewer name
+ * - One element is the rating (number 1-5)
+ * - One element is the review text
+ * - One element is a date string
+ */
+function findReviewsInNestedArray(data: any): ScrapedReview[] {
+    const reviews: ScrapedReview[] = [];
+
+    if (!data || typeof data !== 'object') return reviews;
+
+    // If this is an array, check if it looks like a review entry
+    if (Array.isArray(data)) {
+        const review = tryExtractReviewFromArray(data);
+        if (review) {
+            reviews.push(review);
+            return reviews; // Don't recurse into a found review
+        }
+
+        // Otherwise recurse into each element
+        for (const item of data) {
+            reviews.push(...findReviewsInNestedArray(item));
+        }
+    }
+
+    return reviews;
+}
+
+/**
+ * Try to interpret a nested array as a single Google Maps review.
+ * The structure varies but core patterns are consistent:
+ * 
+ * The review array typically has these characteristics at specific indices:
+ * - Contains a sub-array with a string (reviewer name) and a URL-like string (profile)
+ * - Contains a number 1-5 (rating)
+ * - Contains a string (review text)
+ * - Contains a string matching date patterns (e.g., "2 months ago", "a year ago")
+ */
+function tryExtractReviewFromArray(arr: any[]): ScrapedReview | null {
+    if (!Array.isArray(arr) || arr.length < 3) return null;
+
+    try {
+        // Pattern 1: Standard web response format
+        // [reviewId, [name, profileUrl, ...], rating, text, timestamp, ...]
+        // We look for arrays that have:
+        // - A string that starts with "ChZ" or similar (review ID)
+        // - A sub-array containing a name string
+        // - An integer 1-5 (rating)
+
+        let reviewId: string | undefined;
+        let reviewerName = 'Anonymous';
+        let reviewerUrl: string | undefined;
+        let reviewImage: string | undefined;
+        let reviewCount: number | undefined;
+        let photoCount: number | undefined;
+        let rating = 0;
+        let text: string | undefined;
+        let publishedDate: string | undefined;
+        let responseText: string | undefined;
+        let responseDate: string | undefined;
+
+        // Check if first element is a string (review ID)
+        if (typeof arr[0] === 'string' && arr[0].length > 5) {
+            reviewId = arr[0];
+        }
+
+        // Look for the reviewer info sub-array
+        // It's usually an array that contains the reviewer name as a string
+        // and may have a URL and photo URL
+        for (const item of arr) {
+            if (Array.isArray(item) && item.length >= 1) {
+                // Check if this sub-array has a name (string), possibly nested
+                if (typeof item[0] === 'string' && item[0].length > 0 && item[0].length < 100) {
+                    // Could be reviewer name
+                    if (!reviewerName || reviewerName === 'Anonymous') {
+                        // But skip if it looks like a date string or review text
+                        if (!item[0].match(/ago|year|month|week|day|hour|minute/i) && item[0].length < 50) {
+                            reviewerName = item[0];
+                        }
+                    }
+                }
+                // Look for profile URL
+                if (typeof item[1] === 'string' && item[1].includes('contrib')) {
+                    reviewerUrl = item[1];
+                }
+                // Look for profile image URL
+                if (typeof item[0] === 'string' && item[0].includes('googleusercontent.com')) {
+                    reviewImage = item[0];
+                } else if (typeof item[1] === 'string' && item[1]?.includes('googleusercontent.com')) {
+                    reviewImage = item[1];
+                }
+                // Look for reviewer stats (review count, photo count)
+                if (Array.isArray(item)) {
+                    for (const sub of item) {
+                        if (typeof sub === 'string') {
+                            const rcMatch = sub.match(/(\d+)\s*reviews?/i);
+                            if (rcMatch) reviewCount = parseInt(rcMatch[1]);
+                            const pcMatch = sub.match(/(\d+)\s*photos?/i);
+                            if (pcMatch) photoCount = parseInt(pcMatch[1]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Look for rating (integer 1-5)
+        for (const item of arr) {
+            if (typeof item === 'number' && item >= 1 && item <= 5 && Number.isInteger(item)) {
+                rating = item;
+                break;
+            }
+        }
+
+        // Look for review text (long string, not a URL/ID)
+        for (const item of arr) {
+            if (typeof item === 'string' && item.length > 10 && !item.includes('http') && !item.startsWith('Ch')) {
+                if (!text) text = item;
+            }
+            // Also check nested arrays for text
+            if (Array.isArray(item)) {
+                for (const sub of item) {
+                    if (typeof sub === 'string' && sub.length > 20 && !sub.includes('http') && !sub.startsWith('Ch')) {
+                        if (!text) text = sub;
+                    }
+                }
+            }
+        }
+
+        // Look for date string  
+        for (const item of arr) {
+            if (typeof item === 'string' && item.match(/\d+\s*(day|week|month|year|hour|minute)s?\s*ago/i)) {
+                publishedDate = item;
+                break;
+            }
+            if (Array.isArray(item)) {
+                for (const sub of item) {
+                    if (typeof sub === 'string' && sub.match(/\d+\s*(day|week|month|year|hour|minute)s?\s*ago/i)) {
+                        if (!publishedDate) publishedDate = sub;
+                    }
+                }
+            }
+        }
+
+        // Look for owner response (usually in a nested array near the end)
+        for (const item of arr) {
+            if (Array.isArray(item) && item.length >= 2) {
+                for (const sub of item) {
+                    if (Array.isArray(sub) && sub.length >= 2) {
+                        // Owner response pattern: [responseText, responseTimestamp, ...]
+                        if (typeof sub[0] === 'string' && sub[0].length > 10 && !sub[0].includes('http')) {
+                            if (text && sub[0] !== text) {
+                                responseText = sub[0];
+                                if (typeof sub[1] === 'string' && sub[1].match(/\d+\s*(day|week|month|year)s?\s*ago/i)) {
+                                    responseDate = sub[1];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Only return if we found at minimum a rating
+        if (rating > 0) {
+            return {
+                reviewId,
+                reviewerName,
+                reviewerUrl,
+                reviewImage,
+                reviewCount,
+                photoCount,
+                rating,
+                text,
+                publishedDate,
+                responseText,
+                responseDate,
+            };
+        }
+    } catch {
+        // Not a review
+    }
+
+    return null;
+}
+
+/**
+ * Find a pagination token in the nested response array.
+ * Pagination tokens are typically base64-encoded strings
+ * that appear near the end of the response.
+ */
+function findPaginationToken(data: any): string | null {
+    if (!data || typeof data !== 'object') return null;
+
+    if (typeof data === 'string') {
+        // Pagination tokens are typically long base64 strings
+        if (data.length > 20 && data.length < 500 && /^[A-Za-z0-9+/=_-]+$/.test(data)) {
+            // Extra check: should not be a URL or known field
+            if (!data.includes('http') && !data.startsWith('Ch') && !data.includes('google')) {
+                return data;
+            }
+        }
+        return null;
+    }
+
+    if (Array.isArray(data)) {
+        // Search from the end (tokens usually at the end of the response)
+        for (let i = data.length - 1; i >= 0; i--) {
+            const token = findPaginationToken(data[i]);
+            if (token) return token;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════
+ * HYBRID REVIEW COLLECTOR
+ * ═══════════════════════════════════════════════════════════════
+ * Two collection streams run in parallel:
+ * 1. Network interception — captures reviews from XHR responses
+ * 2. DOM scrolling — triggers network requests + serves as fallback
+ * 
+ * At the end, we merge both sources and deduplicate.
+ * ═══════════════════════════════════════════════════════════════
+ */
 async function scrollAndCollectReviews(
     page: Page,
     expectedTotal: number,
     log: (msg: string) => void
 ): Promise<ScrapedReview[]> {
-    const maxScrollAttempts = Math.min(expectedTotal * 6, 8000);
-    let lastCount = 0;
-    let noNewReviewsCount = 0;
     const startTime = Date.now();
-    const GLOBAL_TIMEOUT_MS = 45 * 60 * 1000; // 45 minutes max for very large businesses
+    const GLOBAL_TIMEOUT_MS = 45 * 60 * 1000;
+
+    // ═══ STREAM 1: Network Interception ═══
+    const networkReviews = new Map<string, ScrapedReview>();
+    let lastPageToken: string | null = null;
+    let networkResponseCount = 0;
+
+    // Listen for all XHR responses that might contain review data
+    page.on('response', async (response) => {
+        try {
+            const url = response.url();
+            const status = response.status();
+
+            // Only process successful responses from Google domains
+            if (status !== 200) return;
+            if (!url.includes('google.com') && !url.includes('googleapis.com')) return;
+
+            // Filter for likely review-containing responses
+            // Google Maps review XHRs match these patterns:
+            const isReviewResponse =
+                url.includes('listentitiesreviews') ||
+                url.includes('listugcposts') ||
+                url.includes('preview/review') ||
+                url.includes('maps/rpc') ||
+                (url.includes('batchexecute') && url.includes('google.com'));
+
+            if (!isReviewResponse) return;
+
+            const contentType = response.headers()['content-type'] || '';
+            if (!contentType.includes('application/json') && !contentType.includes('text/html') && !contentType.includes('application/x-protobuf')) {
+                // Also try text/* responses since Google sometimes returns text/plain
+                if (!contentType.includes('text/')) return;
+            }
+
+            const body = await response.text();
+            if (body.length < 50) return; // Too short to contain review data
+
+            const { reviews, nextPageToken } = parseReviewsFromNetworkResponse(body);
+
+            if (reviews.length > 0) {
+                networkResponseCount++;
+                for (const review of reviews) {
+                    const key = review.reviewId || `${review.reviewerName}-${review.rating}-${(review.text || '').slice(0, 30)}`;
+                    networkReviews.set(key, review);
+                }
+                if (nextPageToken) {
+                    lastPageToken = nextPageToken;
+                }
+            }
+        } catch {
+            // Response parsing failed — ignore and continue
+        }
+    });
+
+    // ═══ STREAM 2: DOM Scrolling (triggers network requests) ═══
+    const maxScrollAttempts = Math.min(expectedTotal * 4, 6000);
+    let lastDOMCount = 0;
+    let noNewCount = 0;
     let lastLoggedCount = 0;
 
-    /**
-     * Adaptive delay that scales with how many reviews are loaded.
-     * Google Maps throttles aggressively above ~300 reviews.
-     * We add random jitter (±500ms) to appear human.
-     */
     const getScrollDelay = (loaded: number): number => {
+        // Faster delays since we're primarily triggering network requests
         let base: number;
-        if (loaded < 100) base = 1500;
-        else if (loaded < 300) base = 2000;
-        else if (loaded < 500) base = 2500;
-        else if (loaded < 1000) base = 3000;
-        else base = 3500;
-        // Add random jitter ±500ms
-        return base + Math.floor(Math.random() * 1000) - 500;
+        if (loaded < 100) base = 800;
+        else if (loaded < 300) base = 1200;
+        else if (loaded < 500) base = 1500;
+        else if (loaded < 1000) base = 2000;
+        else base = 2500;
+        return base + Math.floor(Math.random() * 600) - 300;
     };
 
-    /**
-     * Random incremental scroll distance (1000—2000px).
-     * Larger steps are needed to trigger Google's lazy loader reliably.
-     */
-    const getScrollDistance = (): number => {
-        return 1000 + Math.floor(Math.random() * 1000);
-    };
+    const getScrollDistance = (): number => 1200 + Math.floor(Math.random() * 1200);
 
-    // Count unique review IDs currently in the DOM
     const countReviewsInDOM = async (): Promise<number> => {
         return page.evaluate(() => {
             const withId = document.querySelectorAll('div[data-review-id]');
             if (withId.length > 0) {
-                const uniqueIds = new Set<string>();
-                withId.forEach(el => {
-                    const id = el.getAttribute('data-review-id');
-                    if (id) uniqueIds.add(id);
-                });
-                return uniqueIds.size;
+                const ids = new Set<string>();
+                withId.forEach(el => { const id = el.getAttribute('data-review-id'); if (id) ids.add(id); });
+                return ids.size;
             }
             return document.querySelectorAll('div.jftiEf, div.jJc9Ad').length;
         });
     };
 
-    // Expand all truncated review text ("More" buttons)
-    const expandReviewText = async () => {
-        await page.evaluate(() => {
-            // Multiple selector patterns for the "More"/"See more" button
-            const selectors = [
-                'button.w8nwRe.kyuRq',
-                'button.w8nwRe',
-                'span.w8nwRe',
-            ];
-            for (const sel of selectors) {
-                document.querySelectorAll(sel).forEach(btn => {
-                    const text = btn.textContent?.trim().toLowerCase() || '';
-                    if (text.includes('more') || text.includes('see more')) {
-                        (btn as HTMLElement).click();
-                    }
-                });
-            }
-        });
-    };
-
-    // Find the scrollable reviews container — try multiple selectors dynamically
     const findScrollContainer = async (): Promise<string> => {
-        const found = await page.evaluate(() => {
-            // Priority: most specific to least specific
-            const candidates = [
-                'div.m6QErb.DxyBCb.kA9KIf.dS8AEf',
-                'div.m6QErb.DxyBCb',
-                'div.m6QErb',
-            ];
+        return page.evaluate(() => {
+            const candidates = ['div.m6QErb.DxyBCb.kA9KIf.dS8AEf', 'div.m6QErb.DxyBCb', 'div.m6QErb'];
             for (const sel of candidates) {
                 const el = document.querySelector(sel);
                 if (el && el.scrollHeight > el.clientHeight) return sel;
             }
-            // Fallback: find any scrollable container near reviews
             const reviewEl = document.querySelector('div[data-review-id]');
             if (reviewEl) {
                 let parent = reviewEl.parentElement;
                 for (let i = 0; i < 10 && parent; i++) {
                     if (parent.scrollHeight > parent.clientHeight + 100) {
-                        // Tag it with an ID for reuse
                         parent.id = parent.id || '__review_scroll_container';
                         return `#${parent.id}`;
                     }
@@ -438,180 +729,208 @@ async function scrollAndCollectReviews(
             }
             return 'div.m6QErb.DxyBCb';
         });
-        return found;
     };
 
+    const expandMoreButtons = async () => {
+        await page.evaluate(() => {
+            ['button.w8nwRe.kyuRq', 'button.w8nwRe', 'span.w8nwRe'].forEach(sel => {
+                document.querySelectorAll(sel).forEach(btn => {
+                    const t = btn.textContent?.trim().toLowerCase() || '';
+                    if (t.includes('more') || t.includes('see more')) (btn as HTMLElement).click();
+                });
+            });
+        });
+    };
+
+    log(`🔍 Starting hybrid collection (network interception + DOM scrolling)...`);
+
     for (let i = 0; i < maxScrollAttempts; i++) {
-        // ── Global timeout safety net ──
         if (Date.now() - startTime > GLOBAL_TIMEOUT_MS) {
-            log(`⚠️ Global timeout reached (45 min). Stopping at ${lastCount} reviews.`);
+            log(`⚠️ Global timeout (45 min). Network: ${networkReviews.size}, DOM: ${lastDOMCount}`);
             break;
         }
 
-        const scrollContainerSelector = await findScrollContainer();
+        const selector = await findScrollContainer();
+        const dist = getScrollDistance();
 
-        // ── Incremental scroll (primary strategy) ──
-        // Every 5th scroll, do a full scroll-to-bottom to catch up;
-        // otherwise, scroll incrementally to trigger lazy loading.
-        const scrollDist = getScrollDistance();
-        if (i % 5 === 4) {
-            // Full scroll-to-bottom (catch-up)
-            await page.evaluate((selector) => {
-                const el = document.querySelector(selector);
+        // Scroll strategy: alternate between incremental and full
+        if (i % 4 === 3) {
+            await page.evaluate((sel) => {
+                const el = document.querySelector(sel);
                 if (el) el.scrollTop = el.scrollHeight;
-            }, scrollContainerSelector);
+            }, selector);
         } else {
-            // Incremental scroll — this is what triggers Google's lazy loader
-            await page.evaluate(({ selector, dist }) => {
-                const el = document.querySelector(selector);
-                if (el) el.scrollTop += dist;
-            }, { selector: scrollContainerSelector, dist: scrollDist });
+            await page.evaluate(({ sel, d }) => {
+                const el = document.querySelector(sel);
+                if (el) el.scrollTop += d;
+            }, { sel: selector, d: dist });
         }
 
-        // ── Wait for network + rendering ──
-        // First, wait for network to idle (XHR review fetches to complete)
-        try {
-            await page.waitForLoadState('networkidle', { timeout: 3000 });
-        } catch { /* timeout is fine — just means network is still busy */ }
+        // Wait for network + DOM
+        try { await page.waitForLoadState('networkidle', { timeout: 2000 }); } catch { }
+        await page.waitForTimeout(getScrollDelay(Math.max(lastDOMCount, networkReviews.size)));
 
-        // Then apply the adaptive delay for DOM rendering
-        await page.waitForTimeout(getScrollDelay(lastCount));
+        // Expand "More" buttons periodically
+        if (i % 4 === 0) await expandMoreButtons();
 
-        // ── Expand "More" buttons every 5 scrolls ──
-        if (i % 5 === 0) {
-            await expandReviewText();
-        }
+        // Count DOM reviews
+        const domCount = await countReviewsInDOM();
+        const totalCollected = Math.max(domCount, networkReviews.size);
 
-        // ── Count current reviews ──
-        const currentCount = await countReviewsInDOM();
-
-        // ── Progress logging every 5 scrolls or when count changes significantly ──
-        if (i % 5 === 0 || (currentCount - lastLoggedCount >= 20)) {
+        // Progress logging
+        if (i % 4 === 0 || (totalCollected - lastLoggedCount >= 20)) {
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            const rate = elapsed > 0 ? Math.round((currentCount / elapsed) * 60) : 0;
-            log(`📊 Loaded ${currentCount} / ~${expectedTotal} reviews (${elapsed}s elapsed, ~${rate} reviews/min)`);
-            lastLoggedCount = currentCount;
+            const rate = elapsed > 0 ? Math.round((totalCollected / elapsed) * 60) : 0;
+            log(`📊 Network: ${networkReviews.size} | DOM: ${domCount} / ~${expectedTotal} (${elapsed}s, ~${rate}/min)`);
+            lastLoggedCount = totalCollected;
         }
 
-        // ── Stall detection and recovery ──
-        if (currentCount === lastCount) {
-            noNewReviewsCount++;
+        // Stall detection
+        if (domCount === lastDOMCount && networkReviews.size === lastDOMCount) {
+            noNewCount++;
 
-            // Phase 1 (after 5 stalls): Gentle jiggle — scroll up a bit, then back down
-            if (noNewReviewsCount >= 5 && noNewReviewsCount < 15) {
-                await page.evaluate(({ selector }) => {
-                    const el = document.querySelector(selector);
-                    if (el) {
-                        // Scroll up by 30% of container height
-                        const upBy = Math.floor(el.scrollHeight * 0.3);
-                        el.scrollTop -= upBy;
-                    }
-                }, { selector: scrollContainerSelector });
-                await page.waitForTimeout(2000);
-
-                // Now scroll back to bottom incrementally
+            // Phase 1: Jiggle scroll
+            if (noNewCount >= 4 && noNewCount < 10) {
+                await page.evaluate(({ sel }) => {
+                    const el = document.querySelector(sel);
+                    if (el) el.scrollTop -= Math.floor(el.scrollHeight * 0.3);
+                }, { sel: selector });
+                await page.waitForTimeout(1500);
                 for (let s = 0; s < 3; s++) {
-                    await page.evaluate(({ selector, dist }) => {
-                        const el = document.querySelector(selector);
-                        if (el) el.scrollTop += dist;
-                    }, { selector: scrollContainerSelector, dist: getScrollDistance() });
+                    await page.evaluate(({ sel, d }) => {
+                        const el = document.querySelector(sel);
+                        if (el) el.scrollTop += d;
+                    }, { sel: selector, d: getScrollDistance() });
+                    await page.waitForTimeout(800);
+                }
+            }
+
+            // Phase 2: Full scroll + load more
+            if (noNewCount >= 10 && noNewCount < 20) {
+                await page.evaluate((sel) => {
+                    const el = document.querySelector(sel); if (el) el.scrollTop = el.scrollHeight;
+                }, selector);
+                await page.waitForTimeout(3000);
+                await page.evaluate(() => {
+                    const btn = document.querySelector('button.HzLjNd, button[jsaction*="pane.review-list"]');
+                    if (btn) (btn as HTMLElement).click();
+                });
+                await page.waitForTimeout(2000);
+            }
+
+            // Phase 3: Sort toggle (every 20 stalls)
+            if (noNewCount > 0 && noNewCount % 20 === 0) {
+                log(`⚙️ Stalled at ${totalCollected}. Sort-toggle recovery #${Math.floor(noNewCount / 20)}...`);
+                try {
+                    const sortBtn = page.locator('button[aria-label="Sort reviews"], button[data-value="Sort"]');
+                    if (await sortBtn.first().isVisible({ timeout: 2000 })) {
+                        await sortBtn.first().click();
+                        await page.waitForTimeout(1500);
+                        const opt = page.locator('div[role="menuitemradio"]').first();
+                        if (await opt.isVisible({ timeout: 2000 })) {
+                            await opt.click();
+                            await page.waitForTimeout(3000);
+                        }
+                        await sortBtn.first().click();
+                        await page.waitForTimeout(1500);
+                        const newest = page.locator('div[role="menuitemradio"]:has-text("Newest"), li[data-index="1"]');
+                        if (await newest.first().isVisible({ timeout: 2000 })) {
+                            await newest.first().click();
+                            await page.waitForTimeout(3000);
+                        }
+                    }
+                } catch { }
+
+                // Full top-to-bottom sweep
+                await page.evaluate((sel) => {
+                    const el = document.querySelector(sel); if (el) el.scrollTop = 0;
+                }, selector);
+                await page.waitForTimeout(1500);
+                for (let s = 0; s < 5; s++) {
+                    await page.evaluate(({ sel, d }) => {
+                        const el = document.querySelector(sel); if (el) el.scrollTop += d;
+                    }, { sel: selector, d: getScrollDistance() });
                     await page.waitForTimeout(1000);
                 }
             }
 
-            // Phase 2 (after 15 stalls): Full scroll-to-bottom + longer wait
-            if (noNewReviewsCount >= 15 && noNewReviewsCount < 30) {
-                await page.evaluate((selector) => {
-                    const el = document.querySelector(selector);
-                    if (el) el.scrollTop = el.scrollHeight;
-                }, scrollContainerSelector);
-                await page.waitForTimeout(4000);
-
-                // Try clicking load-more / pagination elements
-                await page.evaluate(() => {
-                    const loadMore = document.querySelector(
-                        'button.HzLjNd, button[jsaction*="pane.review-list"], button[jsaction*="review.moreReviews"]'
-                    );
-                    if (loadMore) (loadMore as HTMLElement).click();
-                });
-                await page.waitForTimeout(3000);
-            }
-
-            // Phase 3 (every 30 stalls): Nuclear — re-sort to force Google to reload review data
-            if (noNewReviewsCount > 0 && noNewReviewsCount % 30 === 0) {
-                log(`⚙️ Stalled at ${currentCount}. Attempting sort-toggle recovery (#${Math.floor(noNewReviewsCount / 30)})...`);
-                try {
-                    // Click sort button
-                    const sortBtn = page.locator('button[aria-label="Sort reviews"], button[data-value="Sort"]');
-                    if (await sortBtn.first().isVisible({ timeout: 3000 })) {
-                        await sortBtn.first().click();
-                        await page.waitForTimeout(1500);
-
-                        // Click "Most relevant" (index 0) to force reload
-                        const relevantOption = page.locator('div[role="menuitemradio"]').first();
-                        if (await relevantOption.isVisible({ timeout: 2000 })) {
-                            await relevantOption.click();
-                            await page.waitForTimeout(4000);
-                        }
-
-                        // Now switch back to "Newest"
-                        await sortBtn.first().click();
-                        await page.waitForTimeout(1500);
-                        const newestOption = page.locator('div[role="menuitemradio"]:has-text("Newest"), li[data-index="1"]');
-                        if (await newestOption.first().isVisible({ timeout: 2000 })) {
-                            await newestOption.first().click();
-                            await page.waitForTimeout(4000);
-                        }
-                    }
-                } catch {
-                    // Sort toggle failed — not critical, continue scrolling
-                }
-
-                // Also try a full scroll to top then back to bottom to shake things loose
-                const scrollSel = await findScrollContainer();
-                await page.evaluate((selector) => {
-                    const el = document.querySelector(selector);
-                    if (el) el.scrollTop = 0;
-                }, scrollSel);
-                await page.waitForTimeout(2000);
-                for (let s = 0; s < 5; s++) {
-                    await page.evaluate(({ selector, dist }) => {
-                        const el = document.querySelector(selector);
-                        if (el) el.scrollTop += dist;
-                    }, { selector: scrollSel, dist: getScrollDistance() });
-                    await page.waitForTimeout(1500);
-                }
-            }
-
-            // ── Final stall limit ──
-            // Very high patience: 200 cycles for large businesses (1000+), 100 for medium, 60 for small
+            // Stall limit — more aggressive since we have network data too
             let stallLimit: number;
-            if (expectedTotal > 1000) stallLimit = 200;
-            else if (expectedTotal > 500) stallLimit = 150;
-            else if (expectedTotal > 200) stallLimit = 100;
-            else stallLimit = 60;
+            if (expectedTotal > 1000) stallLimit = 150;
+            else if (expectedTotal > 500) stallLimit = 100;
+            else if (expectedTotal > 200) stallLimit = 60;
+            else stallLimit = 40;
 
-            if (noNewReviewsCount > stallLimit) {
-                const pct = expectedTotal > 0 ? Math.round((currentCount / expectedTotal) * 100) : 0;
-                log(`⚠️ Stall limit reached (${noNewReviewsCount} cycles). Collected ${currentCount}/${expectedTotal} (${pct}%).`);
+            if (noNewCount > stallLimit) {
+                const pct = expectedTotal > 0 ? Math.round((totalCollected / expectedTotal) * 100) : 0;
+                log(`⚠️ Stall limit. Network: ${networkReviews.size}, DOM: ${domCount}/${expectedTotal} (${pct}%)`);
                 break;
             }
         } else {
-            noNewReviewsCount = 0;
+            noNewCount = 0;
         }
-        lastCount = currentCount;
+        lastDOMCount = domCount;
 
-        // ── Completion check ──
-        if (currentCount >= expectedTotal) {
-            log(`✅ All ${currentCount} reviews loaded.`);
+        // Completion check (use max of both sources)
+        if (totalCollected >= expectedTotal) {
+            log(`✅ Target reached! Network: ${networkReviews.size}, DOM: ${domCount}`);
             break;
         }
     }
 
-    // Now extract all reviews from the page
-    log('Extracting review data from page...');
+    // ═══ EXTRACTION: Merge network + DOM data ═══
+    log(`📥 Collection complete. Network captured: ${networkReviews.size} reviews (from ${networkResponseCount} responses)`);
+
+    // Always extract from DOM too (it may have data network missed, especially owner responses)
+    log('Extracting review data from DOM (fallback + enrichment)...');
+    const domReviews = await extractReviewsFromDOM(page);
+    log(`DOM extracted: ${domReviews.length} reviews`);
+
+    // Merge: prefer DOM data for matching reviews (better owner response + "More" text),
+    // but use network data for any reviews DOM missed
+    const mergedMap = new Map<string, ScrapedReview>();
+
+    // First add DOM reviews (higher quality for owner responses)
+    for (const r of domReviews) {
+        const key = r.reviewId || `${r.reviewerName}-${r.rating}-${(r.text || '').slice(0, 30)}`;
+        mergedMap.set(key, r);
+    }
+
+    // Then add network reviews for any we missed in DOM
+    let networkOnlyCount = 0;
+    for (const [key, r] of networkReviews) {
+        if (!mergedMap.has(key)) {
+            mergedMap.set(key, r);
+            networkOnlyCount++;
+        }
+    }
+
+    if (networkOnlyCount > 0) {
+        log(`🔗 Merged: ${domReviews.length} DOM + ${networkOnlyCount} network-only = ${mergedMap.size} total`);
+    }
+
+    const finalReviews = Array.from(mergedMap.values());
+    log(`✅ Final review count: ${finalReviews.length} / ~${expectedTotal} (${expectedTotal > 0 ? Math.round((finalReviews.length / expectedTotal) * 100) : 0}%)`);
+
+    return finalReviews;
+}
+
+/**
+ * Extract reviews from the DOM (original approach, now used as fallback/enrichment)
+ */
+async function extractReviewsFromDOM(page: Page): Promise<ScrapedReview[]> {
+    // Expand all "More" buttons first
+    await page.evaluate(() => {
+        ['button.w8nwRe.kyuRq', 'button.w8nwRe', 'span.w8nwRe'].forEach(sel => {
+            document.querySelectorAll(sel).forEach(btn => {
+                const t = btn.textContent?.trim().toLowerCase() || '';
+                if (t.includes('more') || t.includes('see more')) (btn as HTMLElement).click();
+            });
+        });
+    });
+    await page.waitForTimeout(500);
+
     const rawReviews = await page.evaluate(() => {
-        // Step 1: Collect review elements — only outermost data-review-id to avoid nested dupes
         const withId = document.querySelectorAll('div[data-review-id]');
         let reviewElements: Element[];
 
@@ -623,10 +942,7 @@ async function scrollAndCollectReviews(
                 let parent = el.parentElement;
                 let isNested = false;
                 while (parent) {
-                    if (parent.hasAttribute('data-review-id')) {
-                        isNested = true;
-                        break;
-                    }
+                    if (parent.hasAttribute('data-review-id')) { isNested = true; break; }
                     parent = parent.parentElement;
                 }
                 if (!isNested && id && !seenIds.has(id)) {
@@ -645,9 +961,7 @@ async function scrollAndCollectReviews(
                 }
                 if (!dominated) {
                     for (let j = filtered.length - 1; j >= 0; j--) {
-                        if (el.contains(filtered[j]) && el !== filtered[j]) {
-                            filtered.splice(j, 1);
-                        }
+                        if (el.contains(filtered[j]) && el !== filtered[j]) filtered.splice(j, 1);
                     }
                     filtered.push(el);
                 }
@@ -656,7 +970,6 @@ async function scrollAndCollectReviews(
         }
 
         const results: any[] = [];
-
         reviewElements.forEach((el) => {
             try {
                 const reviewId = el.getAttribute('data-review-id') || '';
@@ -717,34 +1030,27 @@ async function scrollAndCollectReviews(
                         responseDate: responseDate || undefined,
                     });
                 }
-            } catch (err) {
+            } catch {
                 // Skip malformed review elements
             }
         });
-
         return results;
     });
 
-    // Post-extraction deduplication — only by reviewId
+    // Dedup by reviewId
     const seen = new Set<string>();
-    const dedupedReviews: ScrapedReview[] = [];
-
+    const deduped: ScrapedReview[] = [];
     for (const r of rawReviews) {
         if (r.reviewId) {
-            const key = `id:${r.reviewId}`;
-            if (!seen.has(key)) {
-                seen.add(key);
-                dedupedReviews.push(r as ScrapedReview);
+            if (!seen.has(r.reviewId)) {
+                seen.add(r.reviewId);
+                deduped.push(r as ScrapedReview);
             }
         } else {
-            dedupedReviews.push(r as ScrapedReview);
+            deduped.push(r as ScrapedReview);
         }
     }
 
-    const dupeCount = rawReviews.length - dedupedReviews.length;
-    if (dupeCount > 0) {
-        log(`Removed ${dupeCount} duplicate reviews (${rawReviews.length} raw → ${dedupedReviews.length} unique)`);
-    }
-
-    return dedupedReviews;
+    return deduped;
 }
+
