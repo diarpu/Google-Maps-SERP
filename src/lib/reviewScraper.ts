@@ -139,6 +139,10 @@ export async function scrapeGoogleReviews(
                 log('Sorting reviews by newest...');
                 await sortReviewsByNewest(page);
 
+                // Select "All languages" to capture reviews in every language
+                log('Selecting all languages filter...');
+                await selectAllLanguages(page, log);
+
                 // Verify we can see review elements
                 await page.waitForTimeout(2000);
                 const initialCount = await page.evaluate(() => {
@@ -335,6 +339,96 @@ async function sortReviewsByNewest(page: Page): Promise<void> {
         }
     } catch {
         // Continue without sorting — default "Most Relevant" is still usable
+    }
+}
+
+/**
+ * Select "All languages" in the review language filter.
+ * Google Maps defaults to showing only the user's browser language.
+ * The total review count includes ALL languages, so we must switch
+ * to "All languages" to scrape the complete set.
+ */
+async function selectAllLanguages(page: Page, log: (msg: string) => void): Promise<void> {
+    try {
+        // Strategy 1: Look for the language filter dropdown button
+        // On Google Maps, it appears as a button with text like "English (650)" or similar
+        // near the sort button area, OR as a separate dropdown
+
+        // Try: button with aria-label containing "language" or "Language"
+        let filterClicked = false;
+
+        // Method A: Look for a dropdown/select that contains language options
+        const langButtons = page.locator('button[aria-label*="language"], button[aria-label*="Language"]');
+        if (await langButtons.first().isVisible({ timeout: 2000 })) {
+            await langButtons.first().click();
+            await page.waitForTimeout(1000);
+            filterClicked = true;
+        }
+
+        // Method B: Look for a button near reviews that contains a language name pattern
+        if (!filterClicked) {
+            const allButtons = page.locator('button.HQzyZ, button.e2moi');
+            const count = await allButtons.count();
+            for (let i = 0; i < count; i++) {
+                const text = await allButtons.nth(i).textContent() || '';
+                // Language filter buttons typically show "English (N)" or similar
+                if (text.match(/\w+\s*\(\d+\)/)) {
+                    await allButtons.nth(i).click();
+                    await page.waitForTimeout(1000);
+                    filterClicked = true;
+                    break;
+                }
+            }
+        }
+
+        // Method C: Try clicking any element that looks like it filters by language
+        if (!filterClicked) {
+            const filterBtns = page.locator('div.m6QErb button, div.F7nice ~ button, div.jANrlb button');
+            const count = await filterBtns.count();
+            for (let i = 0; i < Math.min(count, 10); i++) {
+                const text = await filterBtns.nth(i).textContent() || '';
+                const label = await filterBtns.nth(i).getAttribute('aria-label') || '';
+                if (text.match(/english|all\s*lang|language/i) || label.match(/language/i) || text.match(/\w+\s*\(\d{2,}\)/)) {
+                    await filterBtns.nth(i).click();
+                    await page.waitForTimeout(1000);
+                    filterClicked = true;
+                    break;
+                }
+            }
+        }
+
+        if (!filterClicked) {
+            log('No language filter found — may already show all languages');
+            return;
+        }
+
+        // Now select "All languages" from the dropdown/menu
+        // Try multiple patterns for the "All languages" option
+        const allLangOption = page.locator(
+            'div[role="menuitemradio"]:has-text("All"), ' +
+            'div[role="option"]:has-text("All"), ' +
+            'li:has-text("All languages"), ' +
+            'div[role="menuitemradio"]:first-child'
+        );
+
+        if (await allLangOption.first().isVisible({ timeout: 3000 })) {
+            await allLangOption.first().click();
+            await page.waitForTimeout(3000); // Wait for reviews to reload
+            log('✅ Selected "All languages" filter');
+        } else {
+            // Maybe it's a checkbox-style filter at the top of reviews
+            // Try clicking text that says "All" near the language area
+            const allText = page.locator('span:has-text("All languages"), button:has-text("All languages"), div:has-text("All languages")').first();
+            if (await allText.isVisible({ timeout: 2000 })) {
+                await allText.click();
+                await page.waitForTimeout(3000);
+                log('✅ Clicked "All languages" text element');
+            } else {
+                log('⚠️ Could not find "All languages" option');
+            }
+        }
+    } catch (e: any) {
+        log(`Language filter selection failed: ${e.message} — continuing anyway`);
     }
 }
 
