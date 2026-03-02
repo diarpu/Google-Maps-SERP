@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-03-03
+
+### Apify-Level Review Scraper & Export Overhaul
+
+This release completely rewrites the review scraping engine for dramatically improved speed and completeness, and adds rich export options.
+
+#### Added
+- **Hybrid Network Interception Scraper:** Reviews are now captured directly from Google Maps' XHR responses via `page.on('response')`, extracting data from API payloads instead of relying solely on fragile DOM selectors.
+- **Dual-Stream Collection:** Network interception and DOM scrolling run in parallel — network captures the raw data, DOM provides fallback and enrichment (owner responses, expanded text).
+- **Pagination Token Detection:** The scraper detects base64 pagination tokens in API responses for potential follow-up requests.
+- **All Languages Filter:** Scraper now automatically selects "All languages" before scrolling, capturing reviews in every language instead of just the browser default.
+- **XLSX Export:** Multi-tab Excel export with detailed review data, metrics, and analysis.
+- **JSON Export:** Full structured data export in JSON format.
+- **PDF Report Export:** Comprehensive multi-page printable report with executive summary, rating distribution, sentiment analysis, response quality, keywords, themes, strengths/weaknesses, risk alerts, action items, monthly trends, flagged reviews, unresponded negative reviews, and complete review listing.
+
+#### Changed
+- **2x Faster Scrolling:** Scroll delays reduced from 1500-3500ms to 800-2500ms since scrolling now only needs to trigger network requests, not wait for DOM rendering.
+- **Sort-Toggle Recovery:** Triggers every 20 stalls instead of 30 for faster stall recovery.
+- **Scroll Increments:** Increased to 1200-2400px for more aggressive lazy-load triggering.
+- **Infographic Export → PDF Export:** Renamed and completely rewritten with extensive detail.
+
+#### Fixed
+- **Prisma Runtime Errors:** Replaced Prisma ORM calls for `runId`, `runAt`, and `currentRunId` with raw SQL queries to bypass Prisma client type validation cache issues.
+- **Review Rerun Errors:** Fixed `distinct` query and `currentRunId` field errors in rerun/history API routes.
+- **Language Filter Gap:** Fixed issue where scraper collected ~89% of reviews because Google Maps defaults to showing only the user's browser language.
+
+---
+
 ## [1.6.1] - 2026-02-27
 
 ### Address Resolver Reliability Patch
